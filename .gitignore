@@ -1,0 +1,40 @@
+# Rust
+/src-tauri/target/
+**/*.rs.bk
+Cargo.lock.bak
+
+# Node / frontend
+node_modules/
+/build/
+/dist/
+.svelte-kit/
+
+# Tauri
+/src-tauri/gen/
+
+# Test fixtures: the synthetic corpus (small, copyright-free, see corpus/README.md) IS
+# committed. Only corpus/local/ (real/private files a dev adds for local testing) is not.
+src-tauri/tests/fixtures/corpus/local/*
+!src-tauri/tests/fixtures/corpus/local/.gitkeep
+
+# macOS signing
+*.p12
+*.mobileprovision
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Claude Code local permission settings (per-developer, not shared)
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Frontend build artifacts (SvelteKit / Vite)
+/.svelte-kit/
+/package/
+.env
+.env.*
+!.env.example
+vite.config.*.timestamp-*

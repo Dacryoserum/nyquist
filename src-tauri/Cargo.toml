@@ -1,0 +1,43 @@
+[package]
+name = "nyquist"
+version = "0.1.0"
+description = "Desktop audio quality analyzer and lossy-to-lossless transcode detector"
+authors = ["Nyquist contributors"]
+license = "MIT"
+edition = "2021"
+# Two binaries live in this package now (the Tauri GUI app in src/main.rs, and the
+# headless src/bin/nyquist-cli.rs). Without this, plain `cargo run` — which is what
+# Tauri's own dev/build tooling shells out to — can't pick one and errors out.
+default-run = "nyquist"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "nyquist_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# "protocol-asset": lets the frontend stream a user-picked file directly via the built-in
+# asset:// protocol (native <audio> seek/buffering, no loading the whole file into JS
+# memory) — see commands.rs `authorize_playback` and tauri.conf.json assetProtocol.
+tauri = { version = "2", features = ["protocol-asset"] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Sole decoder, see AGENTS.md "Décisions actées" — no claxon until a bit-exact FLAC
+# integrity feature is actually scoped.
+symphonia = { version = "0.6.0", features = ["all"] }
+rustfft = "6.4.1"
+# LUFS + True Peak in one crate (pure Rust port of libebur128, MIT). Not enabling
+# `precision-true-peak`: it trades a real perf hit for a slight precision gain — revisit
+# only if true-peak values are ever shown to diverge meaningfully from reference tools.
+ebur128 = "0.1.10"
+tauri-plugin-dialog = "2.7.2"
+base64 = "0.22.1"
+
