@@ -17,6 +17,7 @@ fn main() -> ExitCode {
     }
 
     let json_output = args.iter().any(|a| a == "--json");
+    let show_timing = args.iter().any(|a| a == "--timing");
     let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
 
     if paths.is_empty() {
@@ -27,8 +28,21 @@ fn main() -> ExitCode {
 
     let mut any_failed = false;
     for path in paths {
-        match analysis::analyze(&PathBuf::from(path)) {
-            Ok(result) => {
+        match analysis::analyze_with_timings(&PathBuf::from(path)) {
+            Ok((result, timings)) => {
+                if show_timing {
+                    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+                    eprintln!(
+                        "{path}: decode {:.0}ms | signal {:.0}ms | DR14 {:.0}ms | spectral \
+                         {:.0}ms | bit-depth {:.0}ms | total {:.0}ms",
+                        ms(timings.decode),
+                        ms(timings.signal),
+                        ms(timings.dynamic_range),
+                        ms(timings.spectral),
+                        ms(timings.bit_depth),
+                        ms(timings.total)
+                    );
+                }
                 if json_output {
                     match serde_json::to_string_pretty(&result) {
                         Ok(json) => println!("{json}"),
@@ -55,7 +69,8 @@ fn print_usage() {
     eprintln!(
         "usage: nyquist-cli [--json] <file>...\n\n\
          Analyzes one or more audio files and prints the results.\n\
-         --json   print each result as a JSON object (one per line group), for scripting.\n\
+         --json     print each result as a JSON object (one per line group), for scripting.\n\
+         --timing   print per-stage wall-clock cost to stderr, for profiling.\n\
          With no --json, prints a human-readable summary per file."
     );
 }
@@ -82,11 +97,20 @@ fn print_human_readable(r: &AnalysisResult) {
     );
     println!("  Duration:          {}", fmt_duration(fi.duration_seconds));
     println!(
-        "  Integrity:         {}",
+        "  Integrity:         {}{}",
         match fi.integrity_verified {
             Some(true) => "verified",
             Some(false) => "FAILED (checksum mismatch)",
             None => "n/a",
+        },
+        if fi.decode_errors > 0 {
+            format!(
+                " ⚠ {} packet(s) failed to decode and were skipped — measurements below \
+                 describe incomplete audio",
+                fi.decode_errors
+            )
+        } else {
+            String::new()
         }
     );
     println!("  Peak / True peak:  {:.1} dBFS / {:.1} dBTP", sa.peak_dbfs, sa.true_peak_dbtp);
@@ -110,6 +134,19 @@ fn print_human_readable(r: &AnalysisResult) {
             _ => String::new(),
         };
         println!("  Bit depth check:   declared {declared}-bit{note}");
+    }
+    let sr = &r.sample_rate_analysis;
+    if sr.likely_upsampled {
+        println!(
+            "  Sample rate check: ⚠ declared {} Hz but content stops at {:.1} kHz ({:.0}% of \
+             available bandwidth){}",
+            sr.declared_sample_rate_hz,
+            sr.content_bandwidth_hz / 1000.0,
+            sr.bandwidth_ratio * 100.0,
+            sr.sufficient_sample_rate_hz
+                .map(|rate| format!(" — {rate} Hz would carry this losslessly"))
+                .unwrap_or_default()
+        );
     }
     println!(
         "  Spectral cutoff:   {:.1} kHz (rolloff {:.0} dB/kHz)",
