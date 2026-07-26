@@ -40,4 +40,22 @@ rustfft = "6.4.1"
 ebur128 = "0.1.10"
 tauri-plugin-dialog = "2.7.2"
 base64 = "0.22.1"
+# Data parallelism for the analysis passes. Pure Rust, MIT/Apache-2.0, no FFI — so it does
+# not affect the licensing decision recorded in AGENTS.md. Used where the work is genuinely
+# independent per item (STFT frames, per-channel statistics) and nowhere else: ebur128 in
+# particular is a sequential filter chain and must stay on one thread.
+rayon = "1.10"
+
+# Distribution profile. This binary ships to strangers, so it is worth the longer build:
+# fat LTO plus a single codegen unit lets the optimizer inline across crate boundaries
+# (which matters for the per-sample loops in signal_analysis/bit_depth), and stripping
+# symbols cuts the shipped size substantially.
+#
+# `panic` is deliberately left at the default `unwind`: `commands::analyze_file` relies on
+# `spawn_blocking` catching a panic and turning it into an error message rather than taking
+# the whole app down with it. `panic = "abort"` would break that recovery.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true
 
