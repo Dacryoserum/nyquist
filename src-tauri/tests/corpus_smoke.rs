@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use nyquist_lib::bit_depth::analyze_bit_depth;
 use nyquist_lib::decode::decode_file;
 use nyquist_lib::metadata::build_file_info;
+use nyquist_lib::sample_rate::analyze_sample_rate;
 use nyquist_lib::signal_analysis::analyze_signal;
 use nyquist_lib::spectral::analyze_spectrum;
 use nyquist_lib::transcode_detect::{assess_transcode_risk, Verdict};
@@ -20,10 +21,17 @@ struct Fixture {
     filename: &'static str,
     expected_sample_rate: u32,
     expected_channels: usize,
-    /// (min, max) Hz the raw spectral cutoff detector should land in — a cross-check
-    /// against the independently ffmpeg-measured ground truth in corpus/README.md, not a
-    /// duplicate of it (different method: our own FFT vs. ffmpeg's highpass+astats sweep).
+    /// (min, max) Hz the measured content bandwidth should land in — the edge where energy
+    /// stops, or Nyquist when nothing bounds it. Cross-checks the independently
+    /// ffmpeg-measured ground truth in corpus/README.md rather than duplicating it.
+    ///
+    /// Note this is no longer the peak-relative "-40 dB below the spectral peak" point: that
+    /// reference only behaves on flat material, and reading it on music-shaped input is what
+    /// made every real file inconclusive. See `spectral::find_spectral_edge`.
     expected_cutoff_range_hz: (f64, f64),
+    /// Nominal length in seconds. Per-fixture rather than a shared constant: the
+    /// silence-padded transcode is deliberately longer than the 5s the rest share.
+    expected_duration_seconds: f64,
     /// Ground truth per corpus/README.md — is this file actually a lossy transcode?
     is_actually_transcoded: bool,
     /// True for the two fixtures documented in corpus/README.md as undetectable by
@@ -43,6 +51,7 @@ const FIXTURES: &[Fixture] = &[
         expected_sample_rate: 44_100,
         expected_channels: 2,
         expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
         known_undetectable: false,
     },
@@ -51,6 +60,7 @@ const FIXTURES: &[Fixture] = &[
         expected_sample_rate: 96_000,
         expected_channels: 2,
         expected_cutoff_range_hz: (46_000.0, 48_000.0),
+        expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
         known_undetectable: false,
     },
@@ -62,6 +72,7 @@ const FIXTURES: &[Fixture] = &[
         expected_sample_rate: 44_100,
         expected_channels: 2,
         expected_cutoff_range_hz: (19_000.0, 22_050.0),
+        expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
         known_undetectable: false,
     },
@@ -69,7 +80,10 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_mp3_320_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (19_000.0, 21_500.0),
+        // LAME 320's wall is narrow enough that the wide bandwidth probe steps over it;
+        // it is caught by steepness, which is what the verdict assertion below covers.
+        expected_cutoff_range_hz: (19_000.0, 22_050.0),
+        expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
         known_undetectable: false,
     },
@@ -78,6 +92,7 @@ const FIXTURES: &[Fixture] = &[
         expected_sample_rate: 44_100,
         expected_channels: 2,
         expected_cutoff_range_hz: (15_500.0, 18_000.0),
+        expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
         known_undetectable: false,
     },
@@ -89,6 +104,7 @@ const FIXTURES: &[Fixture] = &[
         expected_sample_rate: 44_100,
         expected_channels: 2,
         expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
         known_undetectable: true,
     },
@@ -97,8 +113,85 @@ const FIXTURES: &[Fixture] = &[
         expected_sample_rate: 44_100,
         expected_channels: 2,
         expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
         known_undetectable: true,
+    },
+    Fixture {
+        // False-positive trap: genuinely lossless *tonal* content. A sustained chord's
+        // spectrum falls from peak to noise floor within a couple of FFT bins, which a
+        // steepness measurement based on the frequency span between two dB levels reads
+        // as an infinitely steep brick wall. This used to be reported as "probably
+        // transcoded" at 80% confidence — as was the project's own 1 kHz calibration sine.
+        filename: "authentic_44k_tonal.flac",
+        expected_sample_rate: 44_100,
+        expected_channels: 2,
+        // Tonal content has no lowpass, so its bandwidth reads as Nyquist.
+        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_duration_seconds: 5.0,
+        is_actually_transcoded: false,
+        known_undetectable: false,
+    },
+    Fixture {
+        // Music-shaped rather than flat: the case that exposed a peak-relative bandwidth
+        // measurement as unusable. Genuinely lossless and full-bandwidth, so it must read
+        // authentic — it used to come out "indeterminate" at 30%, as every real FLAC did.
+        filename: "authentic_musiclike_44k.flac",
+        expected_sample_rate: 44_100,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_duration_seconds: 10.0,
+        is_actually_transcoded: false,
+        known_undetectable: false,
+    },
+    Fixture {
+        // Same, at a genuine hi-res rate: additionally guards against the sample-rate check
+        // calling real 96 kHz material upsampled, which the same bug caused.
+        filename: "authentic_musiclike_96k.flac",
+        expected_sample_rate: 96_000,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (46_000.0, 48_000.0),
+        expected_duration_seconds: 10.0,
+        is_actually_transcoded: false,
+        known_undetectable: false,
+    },
+    Fixture {
+        // False-negative trap: the same LAME 128 transcode as above, padded with digital
+        // silence the way essentially every real track is (lead-in, fade-out, gaps). The
+        // silence used to raise the averaged noise floor above the encoder's stopband and
+        // switch detection off entirely — 191 dB/kHz became 0, and a caught transcode
+        // became "indeterminate".
+        filename: "transcoded_mp3_128_padded_silence.flac",
+        expected_sample_rate: 44_100,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (15_500.0, 18_000.0),
+        expected_duration_seconds: 11.0,
+        is_actually_transcoded: true,
+        known_undetectable: false,
+    },
+    Fixture {
+        // Lossless throughout, so NOT a transcode — the deception here is the sample rate,
+        // which `sample_rate.rs` covers and which is asserted separately below. Listed
+        // here to prove the transcode verdict doesn't misattribute a resampler's brick
+        // wall to a lossy encoder.
+        filename: "upsampled_44k_to_96k.flac",
+        expected_sample_rate: 96_000,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (22_000.0, 26_000.0),
+        expected_duration_seconds: 5.0,
+        is_actually_transcoded: false,
+        known_undetectable: false,
+    },
+    Fixture {
+        // Both defects at once: lossy source, then upsampled so the encoder cutoff no
+        // longer sits anywhere near the declared Nyquist.
+        filename: "transcoded_mp3_128_upsampled_96k.flac",
+        expected_sample_rate: 96_000,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (15_500.0, 18_000.0),
+        expected_duration_seconds: 5.0,
+        is_actually_transcoded: true,
+        known_undetectable: false,
     },
 ];
 
@@ -127,9 +220,10 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
         let file_info = build_file_info(&path, &decoded)
             .unwrap_or_else(|e| panic!("{}: metadata build failed: {e}", fx.filename));
         assert!(
-            (file_info.duration_seconds - 5.0).abs() < 1.0,
-            "{}: unexpected duration {}",
+            (file_info.duration_seconds - fx.expected_duration_seconds).abs() < 1.0,
+            "{}: expected ~{}s, got {}",
             fx.filename,
+            fx.expected_duration_seconds,
             file_info.duration_seconds
         );
 
@@ -219,6 +313,100 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
         "expected exactly the 2 documented undetectable cases (V0, AAC256) to miss; got {known_misses:?} — \
          if this is now 0, the blind spot may be fixed: update `known_undetectable` and this assertion; \
          if this is >2, something else regressed"
+    );
+}
+
+/// A pure sine is the least ambiguous authentic signal there is, and it lives in this
+/// project's own calibration corpus. It was nevertheless reported as "probably transcoded"
+/// at 80% confidence, because its spectrum drops from peak to noise floor inside a couple
+/// of FFT bins and the old steepness measurement divided a fixed dB drop by that
+/// near-zero frequency span. Guarding the case explicitly: if a sine ever reads as
+/// transcoded again, the rolloff measurement has regressed to dividing by a vanishing
+/// span, whatever else changed around it.
+#[test]
+fn a_pure_sine_is_never_reported_as_transcoded() {
+    let path = corpus_dir().join("calibration/sine_1khz_minus3dbfs.flac");
+    let decoded = decode_file(&path).expect("calibration sine should decode");
+    let file_info = build_file_info(&path, &decoded).expect("metadata should build");
+    let spectral = analyze_spectrum(&decoded).expect("spectral analysis should succeed");
+    let assessment =
+        assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches);
+
+    assert_eq!(
+        spectral.rolloff_steepness_db_per_khz, 0.0,
+        "a sine has no encoder cutoff to measure; got {} dB/kHz",
+        spectral.rolloff_steepness_db_per_khz
+    );
+    assert_ne!(
+        assessment.verdict,
+        Verdict::ProbablyTranscoded,
+        "pure sine flagged as transcoded — false positive, got {:?}",
+        assessment.verdict
+    );
+}
+
+/// `sample_rate::analyze_sample_rate` — the sample-rate counterpart to the bit-depth
+/// padding check below. Genuine hi-res must stay silent; a file resampled up from CD rate
+/// must be caught even though it is lossless end to end and therefore invisible to the
+/// transcode verdict.
+#[test]
+fn upsampled_hi_res_is_detected_without_false_positives() {
+    let cases: &[(&str, bool)] = &[
+        ("upsampled_44k_to_96k.flac", true),
+        ("transcoded_mp3_128_upsampled_96k.flac", true),
+        ("authentic_96k_noise.flac", false),
+        // Music-shaped genuine hi-res: the false positive the peak-relative bandwidth
+        // measurement produced, reporting real 96 kHz content as upsampled from 44.1 kHz.
+        ("authentic_musiclike_96k.flac", false),
+        // A 44.1 kHz file makes no hi-res claim, however treble-poor it is.
+        ("authentic_44k_lowpass_naturally.flac", false),
+    ];
+
+    for (filename, expected_upsampled) in cases {
+        let path = corpus_dir().join(filename);
+        let decoded = decode_file(&path).unwrap_or_else(|e| panic!("{filename}: decode failed: {e}"));
+        let spectral =
+            analyze_spectrum(&decoded).unwrap_or_else(|e| panic!("{filename}: spectral failed: {e}"));
+        let analysis =
+            analyze_sample_rate(decoded.sample_rate, spectral.spectral_cutoff_hz);
+
+        assert_eq!(
+            analysis.likely_upsampled, *expected_upsampled,
+            "{filename}: expected likely_upsampled={expected_upsampled}, got {} \
+             (declared {} Hz, bandwidth {:.0} Hz, ratio {:.2})",
+            analysis.likely_upsampled,
+            analysis.declared_sample_rate_hz,
+            analysis.content_bandwidth_hz,
+            analysis.bandwidth_ratio
+        );
+
+        if *expected_upsampled {
+            let sufficient = analysis
+                .sufficient_sample_rate_hz
+                .unwrap_or_else(|| panic!("{filename}: flagged as upsampled but named no sufficient rate"));
+            assert!(
+                sufficient < analysis.declared_sample_rate_hz,
+                "{filename}: sufficient rate {sufficient} must be below the declared rate"
+            );
+        }
+    }
+}
+
+/// Clipping is counted on both halves of the waveform. Signed PCM is asymmetric — 16-bit
+/// positive full scale normalizes to 0.99997, not 1.0 — so a naive `abs() >= 1.0` test
+/// silently counted only negative-side clipping and halved every reported figure.
+#[test]
+fn clipping_is_counted_symmetrically() {
+    let path = corpus_dir().join("calibration/fullscale_both_polarities.flac");
+    let decoded = decode_file(&path).expect("full-scale fixture should decode");
+    let signal = analyze_signal(&decoded).expect("signal analysis should succeed");
+
+    // 1000 samples at +32767 and 1000 at -32768.
+    assert_eq!(
+        signal.clipping_count_total, 2000,
+        "expected both polarities counted (2000); got {} — a value near 1000 means only \
+         the negative half is being detected",
+        signal.clipping_count_total
     );
 }
 

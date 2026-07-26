@@ -20,16 +20,73 @@ const TARGET_FREQUENCY_BINS: usize = 300;
 /// Not a measurement threshold — purely a visualization contrast choice.
 const DB_FLOOR: f32 = -90.0;
 const DB_CEIL: f32 = 0.0;
+/// Measurement floor, deliberately far below [`DB_FLOOR`]. These must not be the same
+/// number: a lossy encoder's stopband sits *below* -90 dB, so flooring measurements at the
+/// display floor would bury the very cutoff this module exists to measure. Only reached by
+/// exact digital silence.
+const ANALYSIS_FLOOR_DB: f32 = -180.0;
+/// A frame this far below the loudest frame carries no usable information about spectral
+/// *shape* — it is silence, a fade tail, or a gap between movements. Such frames are
+/// excluded from the steady-state envelope entirely. Including them was a real defect:
+/// digital silence decodes to exact zeros, and averaging those in raises the apparent
+/// noise floor above a lossy encoder's true stopband, which silently switched detection
+/// off for any track with a lead-in or fade-out — i.e. most real music.
+const SILENT_FRAME_THRESHOLD_DB: f32 = -70.0;
 /// A frame's energy must be within this many dB of the spectrum's overall peak to count
 /// toward the cutoff — i.e. "the highest frequency that still carries meaningful energy",
 /// not "the highest frequency with any energy at all" (FFT leakage/dither means there's
 /// always *some* energy in every bin).
+///
+/// **Peak-relative, so only meaningful for broadly flat material.** Real music puts its
+/// spectral peak in the low mids and is 40 dB down by ~5 kHz while still carrying content
+/// to Nyquist, so this measure reads ~5 kHz on a perfectly full-bandwidth track. It is kept
+/// for the spectrogram's per-frame overlay, where it is explicitly a visual indication, and
+/// deliberately no longer drives any verdict — see [`find_spectral_edge`].
 const CUTOFF_THRESHOLD_DB: f32 = -40.0;
-/// Reference dB drops (relative to the mean-spectrum peak) used to measure rolloff
-/// steepness — see [`rolloff_steepness_db_per_khz`]. Chosen to bracket a typical lossy
-/// encoder lowpass transition without reaching all the way down to the noise floor.
-const STEEPNESS_UPPER_DB: f32 = -20.0;
-const STEEPNESS_LOWER_DB: f32 = -55.0;
+/// Step used when sweeping for a lowpass edge. Fine enough to land inside a codec's
+/// transition band, coarse enough that the sweep stays cheap.
+const EDGE_SCAN_STEP_HZ: f64 = 100.0;
+/// A drop across the probe window smaller than this is not an edge, just spectral slope.
+const EDGE_MIN_DROP_DB: f32 = 12.0;
+/// Above a real lowpass there is nothing left: the spectrum drops and *stays* down to
+/// Nyquist. Requiring the whole region above the candidate to remain at least this far
+/// below the passband is what separates a codec's brick wall from an ordinary dip that the
+/// spectrum climbs back out of.
+const EDGE_SUSTAINED_DROP_DB: f32 = 10.0;
+/// Half-width of the probe window straddling the cutoff, used to measure how abruptly
+/// energy falls there — see [`measure_rolloff_steepness`].
+///
+/// Swept over the corpus at 300/500/1000 Hz before settling here. Narrower windows
+/// separate the classes further on synthetic fixtures (300 Hz puts authentic content at
+/// ≤12 dB/kHz against 135 for a LAME transcode, vs 12 against 90 at 500 Hz) but that extra
+/// margin is bought by assuming the detected cutoff sits exactly on the filter edge, which
+/// holds for a clean synthetic brick wall and much less well for real music. 500 Hz keeps
+/// a ~5x class separation while averaging over roughly 46 FFT bins, so a slightly
+/// misplaced cutoff estimate still straddles the transition.
+const STEEPNESS_PROBE_HZ: f64 = 500.0;
+/// Probe half-width used to locate where content *ends*, as opposed to how sharply it does
+/// so. Wider than [`STEEPNESS_PROBE_HZ`] because a resampler's anti-imaging filter spreads
+/// its transition across a couple of kHz — measured at ~2.7 kHz on the 44.1→96 kHz corpus
+/// fixture — and at the narrow scale no single window shows enough drop to register, which
+/// made an upsampled file report its full declared bandwidth.
+const BANDWIDTH_PROBE_HZ: f64 = 2_500.0;
+/// No lossy encoder used for music lowpasses below this — LAME's most aggressive presets
+/// bottom out around 8-11 kHz. A "cutoff" measured below this is the top of the content's
+/// own bandwidth, not a filter edge: a sustained chord or a test tone falls from peak to
+/// noise floor within a couple of FFT bins, which any two-point steepness measurement
+/// reads as an infinitely steep brick wall. Gating on plausibility here is what stops a
+/// pure sine — the most unambiguously authentic signal there is — from being accused.
+const MIN_PLAUSIBLE_ENCODER_CUTOFF_HZ: f64 = 8_000.0;
+/// A real encoder lowpass cuts off *broadband* content: the spectrum runs at a sustained
+/// level right up to the edge and then falls off a cliff. Tonal content instead reaches
+/// its highest partial and stops, with mostly noise floor underneath. Requiring the octave
+/// below the cutoff to be this densely occupied (relative to the level at the edge itself,
+/// not to the global peak — real music's spectral peak is down in the low mids) separates
+/// "filter edge" from "the content simply ends here".
+const EDGE_OCCUPANCY_MIN: f64 = 0.6;
+/// How far below the level at the cutoff edge a bin may sit and still count as "occupied"
+/// for [`EDGE_OCCUPANCY_MIN`].
+const EDGE_OCCUPANCY_TOLERANCE_DB: f32 = 20.0;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -58,6 +115,11 @@ pub struct SpectralAnalysis {
     /// measured on a real orchestral track) without being a transcode. A raw indicator
     /// only — see module docs.
     pub rolloff_steepness_db_per_khz: f64,
+    /// Where the narrow-probe scan found a codec-like edge, if it found one. `None` means
+    /// no lowpass is present anywhere above 8 kHz, which is the positive evidence behind a
+    /// "probably authentic" verdict. Distinct from `spectral_cutoff_hz`, which is measured
+    /// at a wider scale and answers "where does content end" rather than "is there a wall".
+    pub encoder_edge_hz: Option<f64>,
     /// `spectral_cutoff_hz` computed independently within each of the spectrogram's time
     /// bins (same `global_peak_db` reference throughout, so values are directly
     /// comparable across the track) rather than once over the whole file. Catches a
@@ -74,8 +136,10 @@ pub fn analyze_spectrum(decoded: &DecodedAudio) -> Result<SpectralAnalysis, Stri
         return Err("cannot compute spectrum: no decoded audio".to_string());
     }
 
-    let mono = downmix_to_mono(decoded);
-    if mono.len() < FFT_SIZE {
+    // Shortest channel bounds the analysis: a truncated final packet can leave one channel
+    // a sample longer than another, and reading past the short one would panic.
+    let sample_len = decoded.channel_samples.iter().map(|c| c.len()).min().unwrap_or(0);
+    if sample_len < FFT_SIZE {
         return Err("file too short for spectral analysis".to_string());
     }
 
@@ -86,28 +150,83 @@ pub fn analyze_spectrum(decoded: &DecodedAudio) -> Result<SpectralAnalysis, Stri
     let fft = planner.plan_fft_forward(FFT_SIZE);
     let window = hann_window(FFT_SIZE);
 
-    let frame_count = (mono.len() - FFT_SIZE) / HOP_SIZE + 1;
-    let mut frames_db: Vec<Vec<f32>> = Vec::with_capacity(frame_count);
+    let frame_count = (sample_len - FFT_SIZE) / HOP_SIZE + 1;
 
+    // One contiguous `[frame][bin]` buffer rather than a `Vec<Vec<f32>>`. The nested form
+    // meant one heap allocation per frame — 22 500 of them on an 8-minute 96 kHz file — and
+    // scattered the rows, which hurts the column-wise scans below (they walk one bin across
+    // every frame). Frames are independent, so they also fill in parallel; the FFT plan is
+    // shared and each worker keeps its own scratch buffer.
+    let mut frames_db = vec![0.0f32; frame_count * raw_bin_count];
+    let inv_channels = 1.0 / decoded.channels as f32;
+    let channels = &decoded.channel_samples;
     let mut scratch = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
+
+    // Left sequential on purpose, having measured the alternative. Filling these frames in
+    // parallel does cut this stage's own latency (~850ms to ~620ms), but the stage is not on
+    // the critical path — `signal_analysis` is, and its true-peak meter is a single
+    // sequential filter chain that cannot be split. Parallelising here just takes workers
+    // away from that chain, which made total wall time *worse* (3.67s to 3.88s) while
+    // raising total CPU. The whole-pipeline win came from running the four stages
+    // concurrently in `analysis.rs`; subdividing further only competes with it.
     for frame_idx in 0..frame_count {
         let start = frame_idx * HOP_SIZE;
-        for i in 0..FFT_SIZE {
-            scratch[i] = Complex32::new(mono[start + i] * window[i], 0.0);
+
+        // Downmixed one frame at a time rather than materializing a whole-track mono copy,
+        // which was another full-length f32 buffer (184 MB on an 8-minute 96 kHz file).
+        // Specialized per channel count so the common cases stay a straight vectorizable
+        // pass: a generic loop over a `Vec<Vec<f32>>` per sample cost more CPU than the
+        // buffer it saved. Summing in channel order keeps results identical either way.
+        match channels.len() {
+            1 => {
+                let ch = &channels[0][start..start + FFT_SIZE];
+                for (slot, (&s, &w)) in scratch.iter_mut().zip(ch.iter().zip(window.iter())) {
+                    *slot = Complex32::new(s * w, 0.0);
+                }
+            }
+            2 => {
+                let left = &channels[0][start..start + FFT_SIZE];
+                let right = &channels[1][start..start + FFT_SIZE];
+                for (i, slot) in scratch.iter_mut().enumerate() {
+                    *slot = Complex32::new((left[i] + right[i]) * inv_channels * window[i], 0.0);
+                }
+            }
+            _ => {
+                for (i, slot) in scratch.iter_mut().enumerate() {
+                    let mut sum = 0.0f32;
+                    for channel in channels {
+                        sum += channel[start + i];
+                    }
+                    *slot = Complex32::new(sum * inv_channels * window[i], 0.0);
+                }
+            }
         }
+
         fft.process(&mut scratch);
 
-        let mut bins_db = Vec::with_capacity(raw_bin_count);
-        for bin in scratch.iter().take(raw_bin_count) {
-            let magnitude = bin.norm() / (FFT_SIZE as f32 / 2.0);
-            bins_db.push(linear_to_db(magnitude));
+        let out = &mut frames_db[frame_idx * raw_bin_count..(frame_idx + 1) * raw_bin_count];
+        for (bin, slot) in scratch.iter().take(raw_bin_count).zip(out.iter_mut()) {
+            *slot = linear_to_db(bin.norm() / (FFT_SIZE as f32 / 2.0));
         }
-        frames_db.push(bins_db);
     }
 
-    let global_peak_db = frames_db.iter().flatten().copied().fold(f32::MIN, f32::max);
-    let spectral_cutoff_hz = detect_cutoff_in_frames(&frames_db, global_peak_db, raw_bin_count, nyquist_hz);
-    let rolloff_steepness_db_per_khz = measure_rolloff_steepness(&frames_db, raw_bin_count, nyquist_hz);
+    let global_peak_db = frames_db.iter().copied().fold(f32::MIN, f32::max);
+    let mean_db = mean_spectrum(&frames_db, raw_bin_count);
+
+    // Two scans at two scales, because "is there a codec brick wall" and "where does the
+    // content actually end" are different questions — see `find_spectral_edge`.
+    //
+    // Steepness comes from the narrow probe: it measures a near-vertical codec edge sharply
+    // and stays blind to gentler slopes, which is what makes it a usable transcode signal.
+    let encoder_edge = find_spectral_edge(&mean_db, raw_bin_count, nyquist_hz, STEEPNESS_PROBE_HZ);
+    let encoder_edge_hz = encoder_edge.map(|(edge_hz, _)| edge_hz);
+    let rolloff_steepness_db_per_khz = encoder_edge.map(|(_, steepness)| steepness).unwrap_or(0.0);
+
+    // Bandwidth comes from the wide probe, which also catches a resampler's broader
+    // transition, and falls back to Nyquist when nothing bounds the content at all.
+    let spectral_cutoff_hz = find_spectral_edge(&mean_db, raw_bin_count, nyquist_hz, BANDWIDTH_PROBE_HZ)
+        .map(|(edge_hz, _)| edge_hz)
+        .unwrap_or(nyquist_hz);
 
     let time_bin_count = TARGET_TIME_BINS.min(frame_count);
     let frequency_bin_count = TARGET_FREQUENCY_BINS.min(raw_bin_count);
@@ -118,33 +237,22 @@ pub fn analyze_spectrum(decoded: &DecodedAudio) -> Result<SpectralAnalysis, Stri
     Ok(SpectralAnalysis {
         spectral_cutoff_hz,
         rolloff_steepness_db_per_khz,
+        encoder_edge_hz,
         cutoff_over_time_hz,
         spectrogram: SpectrogramData {
             time_bin_count,
             frequency_bin_count,
             max_frequency_hz: nyquist_hz,
-            duration_seconds: mono.len() as f64 / decoded.sample_rate as f64,
+            duration_seconds: sample_len as f64 / decoded.sample_rate as f64,
             intensity_base64: base64_encode(&intensity),
         },
     })
 }
 
-fn downmix_to_mono(decoded: &DecodedAudio) -> Vec<f32> {
-    if decoded.channels == 1 {
-        return decoded.channel_samples[0].clone();
-    }
-    let len = decoded.channel_samples[0].len();
-    let mut mono = vec![0.0f32; len];
-    for channel in &decoded.channel_samples {
-        for (m, s) in mono.iter_mut().zip(channel.iter()) {
-            *m += s;
-        }
-    }
-    let inv_channels = 1.0 / decoded.channels as f32;
-    for m in &mut mono {
-        *m *= inv_channels;
-    }
-    mono
+
+/// Number of frames held in a flat `[frame][bin]` buffer.
+fn frame_count_of(frames_db: &[f32], raw_bin_count: usize) -> usize {
+    frames_db.len() / raw_bin_count
 }
 
 fn hann_window(size: usize) -> Vec<f32> {
@@ -154,10 +262,10 @@ fn hann_window(size: usize) -> Vec<f32> {
 }
 
 fn linear_to_db(magnitude: f32) -> f32 {
-    if magnitude <= 1e-10 {
-        DB_FLOOR
+    if magnitude <= 0.0 {
+        ANALYSIS_FLOOR_DB
     } else {
-        20.0 * magnitude.log10()
+        (20.0 * magnitude.log10()).max(ANALYSIS_FLOOR_DB)
     }
 }
 
@@ -166,14 +274,15 @@ fn linear_to_db(magnitude: f32) -> f32 {
 /// frequency", not "first frequency that happens to be loud". `peak_db` is passed in
 /// (rather than computed from `frames`) so callers can share one whole-file reference
 /// across many windows — see [`cutoff_over_time`].
-fn detect_cutoff_in_frames(frames: &[Vec<f32>], peak_db: f32, raw_bin_count: usize, nyquist_hz: f64) -> f64 {
+fn detect_cutoff_in_frames(frames: &[f32], peak_db: f32, raw_bin_count: usize, nyquist_hz: f64) -> f64 {
     if peak_db <= DB_FLOOR || frames.is_empty() {
         return 0.0;
     }
     let threshold = peak_db + CUTOFF_THRESHOLD_DB;
 
     for bin in (0..raw_bin_count).rev() {
-        let bin_peak_db = frames.iter().map(|frame| frame[bin]).fold(f32::MIN, f32::max);
+        let bin_peak_db =
+            frames.chunks_exact(raw_bin_count).map(|frame| frame[bin]).fold(f32::MIN, f32::max);
         if bin_peak_db >= threshold {
             return bin as f64 / raw_bin_count as f64 * nyquist_hz;
         }
@@ -185,110 +294,214 @@ fn detect_cutoff_in_frames(frames: &[Vec<f32>], peak_db: f32, raw_bin_count: usi
 /// windows over `frames_db` — same window boundaries as `downsample_and_quantize`, so the
 /// result lines up with the spectrogram's time axis. See `SpectralAnalysis::cutoff_over_time_hz`.
 fn cutoff_over_time(
-    frames_db: &[Vec<f32>],
+    frames_db: &[f32],
     raw_bin_count: usize,
     nyquist_hz: f64,
     time_bin_count: usize,
     global_peak_db: f32,
 ) -> Vec<f64> {
-    let frame_count = frames_db.len();
+    let frame_count = frame_count_of(frames_db, raw_bin_count);
     (0..time_bin_count)
         .map(|t| {
             let frame_start = t * frame_count / time_bin_count;
             let frame_end = ((t + 1) * frame_count / time_bin_count).max(frame_start + 1).min(frame_count);
-            detect_cutoff_in_frames(&frames_db[frame_start..frame_end], global_peak_db, raw_bin_count, nyquist_hz)
+            detect_cutoff_in_frames(
+                &frames_db[frame_start * raw_bin_count..frame_end * raw_bin_count],
+                global_peak_db,
+                raw_bin_count,
+                nyquist_hz,
+            )
         })
         .collect()
 }
 
-/// Steady-state spectral envelope (mean over time, not max) — max-over-time is right for
-/// the visualization (preserves transients) but would overstate how much energy survives
-/// at a given frequency for the purpose of measuring a *sustained* rolloff shape.
-fn mean_spectrum(frames_db: &[Vec<f32>], raw_bin_count: usize) -> Vec<f32> {
-    let mut mean = vec![0.0f32; raw_bin_count];
-    for frame in frames_db {
-        for (m, &v) in mean.iter_mut().zip(frame.iter()) {
-            *m += v;
+/// Steady-state spectral envelope, averaged in the **power** domain over the frames that
+/// actually carry signal.
+///
+/// Two things here are deliberate and were both bugs in the first implementation:
+///
+/// - **Power-domain, not dB-domain, averaging.** Averaging dB values computes a geometric
+///   mean of power, which is dominated by the quietest frames rather than representing the
+///   track's actual energy distribution.
+/// - **Near-silent frames are skipped.** Digital silence decodes to exact zeros, i.e. the
+///   measurement floor, in *every* bin. Averaging those in lifts the whole envelope's
+///   noise floor toward that floor and flattens the contrast the cutoff measurement
+///   depends on. Concretely: prepending a few seconds of silence to a known LAME 128
+///   transcode used to drop its measured steepness from 191 dB/kHz to 0, flipping the
+///   verdict from "probably transcoded" to "indeterminate" — a silent false negative on
+///   almost every real track, since nearly all of them start or end quiet.
+///
+/// Mean over time rather than max: max-over-time is right for the visualization (it
+/// preserves transients) but overstates how much energy *survives* at a given frequency,
+/// which is what a sustained rolloff shape is about.
+fn mean_spectrum(frames_db: &[f32], raw_bin_count: usize) -> Vec<f32> {
+    let frame_level = |frame: &[f32]| frame.iter().copied().fold(f32::MIN, f32::max);
+    let loudest = frames_db.chunks_exact(raw_bin_count).map(frame_level).fold(f32::MIN, f32::max);
+    let silence_cutoff = loudest + SILENT_FRAME_THRESHOLD_DB;
+
+    let mut power = vec![0.0f64; raw_bin_count];
+    let mut counted = 0usize;
+    for frame in frames_db.chunks_exact(raw_bin_count).filter(|f| frame_level(f) > silence_cutoff) {
+        for (p, &db) in power.iter_mut().zip(frame.iter()) {
+            *p += 10f64.powf(db as f64 / 10.0);
         }
+        counted += 1;
     }
-    let inv_frames = 1.0 / frames_db.len() as f32;
-    for m in &mut mean {
-        *m *= inv_frames;
+
+    // Every frame was silence (a digitally silent file): nothing to characterize.
+    if counted == 0 {
+        return vec![ANALYSIS_FLOOR_DB; raw_bin_count];
     }
-    mean
+
+    power
+        .iter()
+        .map(|&p| {
+            let mean = p / counted as f64;
+            if mean <= 0.0 {
+                ANALYSIS_FLOOR_DB
+            } else {
+                (10.0 * mean.log10()).max(ANALYSIS_FLOOR_DB as f64) as f32
+            }
+        })
+        .collect()
 }
 
-/// Highest frequency where the steady-state spectrum crosses `threshold_db` below the
-/// spectrum's own peak. Used twice (at two different thresholds) to measure rolloff
-/// steepness — see [`measure_rolloff_steepness`].
-fn highest_crossing_hz(mean_db: &[f32], peak_db: f32, threshold_db: f32, raw_bin_count: usize, nyquist_hz: f64) -> f64 {
-    let target = peak_db + threshold_db;
-    for bin in (0..raw_bin_count).rev() {
-        if mean_db[bin] >= target {
-            return bin as f64 / raw_bin_count as f64 * nyquist_hz;
-        }
+/// Mean power level (in dB) of the steady-state envelope across a frequency band.
+fn band_level_db(mean_db: &[f32], lo_hz: f64, hi_hz: f64, raw_bin_count: usize, nyquist_hz: f64) -> f32 {
+    let to_bin = |hz: f64| ((hz / nyquist_hz * raw_bin_count as f64).round() as isize).clamp(0, raw_bin_count as isize) as usize;
+    let lo = to_bin(lo_hz);
+    let hi = to_bin(hi_hz).max(lo + 1).min(raw_bin_count);
+    if lo >= hi {
+        return ANALYSIS_FLOOR_DB;
     }
-    0.0
+
+    let sum: f64 = mean_db[lo..hi].iter().map(|&db| 10f64.powf(db as f64 / 10.0)).sum();
+    let mean = sum / (hi - lo) as f64;
+    if mean <= 0.0 {
+        ANALYSIS_FLOOR_DB
+    } else {
+        (10.0 * mean.log10()).max(ANALYSIS_FLOOR_DB as f64) as f32
+    }
 }
 
-/// dB drop per kHz between two reference points on the steady-state spectral envelope
-/// (`STEEPNESS_UPPER_DB` and `STEEPNESS_LOWER_DB` below peak). A narrow frequency span
-/// for that dB drop means a steep/abrupt transition (encoder-lowpass-like); a wide span
-/// means a gradual one (natural mix/mastering rolloff-like). See `SpectralAnalysis` docs
-/// for why this matters — cutoff *position* alone cannot make that distinction.
-fn measure_rolloff_steepness(frames_db: &[Vec<f32>], raw_bin_count: usize, nyquist_hz: f64) -> f64 {
-    let mean_db = mean_spectrum(frames_db, raw_bin_count);
-    let peak_db = mean_db.iter().copied().fold(f32::MIN, f32::max);
-    if peak_db <= DB_FLOOR {
+/// Fraction of bins in the octave below `cutoff_hz` sitting within
+/// [`EDGE_OCCUPANCY_TOLERANCE_DB`] of the level at the cutoff edge itself.
+///
+/// This is the test that tells a filter edge apart from "the content simply ran out".
+/// A lossy encoder's lowpass truncates broadband material, so the band leading up to it is
+/// densely filled; a chord or a test tone reaches its top partial with nothing but noise
+/// floor underneath. Referenced to the edge level rather than the spectrum's global peak
+/// on purpose — real music peaks down in the low mids, so a peak-relative test would
+/// report near-zero occupancy for every track and disable detection wholesale.
+fn edge_occupancy(mean_db: &[f32], cutoff_hz: f64, raw_bin_count: usize, nyquist_hz: f64) -> f64 {
+    let edge_level = band_level_db(mean_db, cutoff_hz * 0.9, cutoff_hz, raw_bin_count, nyquist_hz);
+    let threshold = edge_level - EDGE_OCCUPANCY_TOLERANCE_DB;
+
+    let to_bin = |hz: f64| ((hz / nyquist_hz * raw_bin_count as f64).round() as isize).clamp(0, raw_bin_count as isize) as usize;
+    let lo = to_bin(cutoff_hz * 0.5);
+    let hi = to_bin(cutoff_hz).max(lo + 1).min(raw_bin_count);
+    if lo >= hi {
         return 0.0;
     }
 
-    let f_upper = highest_crossing_hz(&mean_db, peak_db, STEEPNESS_UPPER_DB, raw_bin_count, nyquist_hz);
-    let f_lower = highest_crossing_hz(&mean_db, peak_db, STEEPNESS_LOWER_DB, raw_bin_count, nyquist_hz);
+    let occupied = mean_db[lo..hi].iter().filter(|&&db| db >= threshold).count();
+    occupied as f64 / (hi - lo) as f64
+}
 
-    // If the spectrum never meaningfully drops toward the lower reference level before
-    // reaching Nyquist, there is nothing to measure at all — this must return "no rolloff
-    // found" (0.0), not "infinitely steep". A near-zero span here means the scan found no
-    // real transition (flat spectrum all the way up), which is the opposite situation
-    // from an actual near-instant transition; conflating the two via a naive division
-    // previously misclassified every full-bandwidth file (noise, V0, AAC256) as having an
-    // extremely steep — i.e. artificial-looking — cutoff. See corpus_smoke.rs.
-    let near_nyquist_margin_hz = nyquist_hz * 0.02;
-    if f_lower >= nyquist_hz - near_nyquist_margin_hz {
-        return 0.0;
+/// Where a lossy encoder's lowpass sits, found by sweeping the whole plausible range rather
+/// than trusting one position.
+///
+/// The earlier design measured steepness only at `spectral_cutoff_hz`, the highest bin
+/// within 40 dB of the spectrum's *peak*. That reference is only sound for flat material.
+/// Real music peaks in the low mids, so it is 40 dB down by around 5 kHz while still
+/// carrying content all the way up — which meant the measurement was taken at ~5 kHz, far
+/// from any encoder edge, and the "spectral content reaches Nyquist" test for authenticity
+/// (cutoff/Nyquist ≥ 0.92) was unreachable for anything that sounded like music. Every real
+/// FLAC came out `Indeterminate` at 30%, and genuine hi-res was additionally misreported as
+/// upsampled because the same number fed `sample_rate.rs`. The synthetic corpus never
+/// showed it: white noise is flat, so for those fixtures the peak-relative point really is
+/// at Nyquist.
+///
+/// Returns `(edge_hz, steepness_db_per_khz)`, or `None` when no edge survives the gates —
+/// which is the positive evidence that no encoder lowpass is present.
+/// `probe_hz` sets the scale the edge is looked for at, and the two scales answer different
+/// questions. A codec's brick wall is near-vertical, so the narrow probe measures its
+/// steepness sharply. A resampler's anti-imaging filter is comparatively wide — the
+/// 44.1→96 kHz corpus fixture spreads its transition over roughly 2.7 kHz — so at the narrow
+/// scale no single window ever shows a large enough drop and the edge is missed entirely.
+/// Scanning again with a wide probe finds where content actually ends, which is what the
+/// sample-rate check needs; using the narrow result for it reported that fixture as
+/// full-bandwidth 96 kHz.
+fn find_spectral_edge(
+    mean_db: &[f32],
+    raw_bin_count: usize,
+    nyquist_hz: f64,
+    probe_hz: f64,
+) -> Option<(f64, f64)> {
+    let scan_end = nyquist_hz - probe_hz;
+    if MIN_PLAUSIBLE_ENCODER_CUTOFF_HZ >= scan_end {
+        return None;
     }
 
-    let span_khz = (f_lower - f_upper).abs() / 1000.0;
-    if span_khz < 0.1 {
-        // A genuine transition was found (f_lower is well below Nyquist) but compressed
-        // into a near-zero span: as steep as this measurement can resolve.
-        return (STEEPNESS_LOWER_DB - STEEPNESS_UPPER_DB).abs() as f64 / 0.1;
+    // Strongest drop across the probe window anywhere in the plausible range.
+    let mut best_hz = 0.0f64;
+    let mut best_drop = 0.0f32;
+    let mut candidate = MIN_PLAUSIBLE_ENCODER_CUTOFF_HZ;
+    while candidate <= scan_end {
+        let below = band_level_db(mean_db, candidate - probe_hz, candidate, raw_bin_count, nyquist_hz);
+        let above = band_level_db(mean_db, candidate, candidate + probe_hz, raw_bin_count, nyquist_hz);
+        let drop = below - above;
+        if drop > best_drop {
+            best_drop = drop;
+            best_hz = candidate;
+        }
+        candidate += EDGE_SCAN_STEP_HZ;
     }
-    (STEEPNESS_LOWER_DB - STEEPNESS_UPPER_DB).abs() as f64 / span_khz
+
+    if best_drop < EDGE_MIN_DROP_DB {
+        return None;
+    }
+
+    // Gate 1: the band leading up to the edge must be broadband, not the last partial of
+    // tonal content — see `edge_occupancy`.
+    if edge_occupancy(mean_db, best_hz, raw_bin_count, nyquist_hz) < EDGE_OCCUPANCY_MIN {
+        return None;
+    }
+
+    // Gate 2: everything above must stay down. A codec lowpass leaves an empty stopband all
+    // the way to Nyquist; a dip the spectrum recovers from is program material, not a filter.
+    let passband = band_level_db(mean_db, best_hz - probe_hz, best_hz, raw_bin_count, nyquist_hz);
+    let stopband = band_level_db(mean_db, best_hz + probe_hz, nyquist_hz, raw_bin_count, nyquist_hz);
+    if passband - stopband < EDGE_SUSTAINED_DROP_DB {
+        return None;
+    }
+
+    Some((best_hz, best_drop as f64 / (probe_hz / 1000.0)))
 }
 
 /// Max-pools over time (preserves transient peaks for the visualization) and mean-pools
 /// over frequency (avoids single-bin noise causing visual banding), then quantizes to u8
 /// against a fixed dB range for a consistent look across files.
 fn downsample_and_quantize(
-    frames_db: &[Vec<f32>],
+    frames_db: &[f32],
     raw_bin_count: usize,
     time_bin_count: usize,
     frequency_bin_count: usize,
 ) -> Vec<u8> {
-    let frame_count = frames_db.len();
+    let frame_count = frame_count_of(frames_db, raw_bin_count);
     let mut out = vec![0u8; time_bin_count * frequency_bin_count];
 
     for t in 0..time_bin_count {
         let frame_start = t * frame_count / time_bin_count;
         let frame_end = ((t + 1) * frame_count / time_bin_count).max(frame_start + 1).min(frame_count);
+        let window = &frames_db[frame_start * raw_bin_count..frame_end * raw_bin_count];
 
         for f in 0..frequency_bin_count {
             let bin_start = f * raw_bin_count / frequency_bin_count;
             let bin_end = ((f + 1) * raw_bin_count / frequency_bin_count).max(bin_start + 1).min(raw_bin_count);
 
             let mut max_over_time = DB_FLOOR;
-            for frame in &frames_db[frame_start..frame_end] {
+            for frame in window.chunks_exact(raw_bin_count) {
                 let mean_over_freq: f32 =
                     frame[bin_start..bin_end].iter().sum::<f32>() / (bin_end - bin_start) as f32;
                 max_over_time = max_over_time.max(mean_over_freq);

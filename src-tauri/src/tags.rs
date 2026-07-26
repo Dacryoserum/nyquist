@@ -10,11 +10,29 @@ use serde::Serialize;
 use symphonia::core::formats::FormatReader;
 use symphonia::core::meta::RawValue;
 
-/// Substrings (case-insensitive) of known lossy encoders/tools, checked against every tag
-/// value in the file. Not exhaustive — a miss here means "no match found", not "no lossy
-/// encoder was ever involved".
+/// Substrings (case-insensitive) of encoders that **only** ever produce lossy output, so
+/// finding one named as the encoding tool is genuine evidence a lossy stage happened. Not
+/// exhaustive — a miss here means "no match found", not "no lossy encoder was involved".
+///
+/// Deliberately excludes `itunes`: iTunes/Music.app is one of the most widely used
+/// *lossless* CD rippers there is (ALAC), and it stamps its name into the encoder tag of
+/// those files just as it does for AAC purchases. Treating it as a lossy signature made
+/// every iTunes-ripped ALAC read as "probably transcoded". A tool that can produce either
+/// format is not evidence of which one happened, so it does not belong on this list.
 const KNOWN_LOSSY_ENCODER_PATTERNS: &[&str] =
-    &["lame3", "lame v3", "itunes", "qaac", "nero aac", "faac", "fdk-aac", "fhg", "fraunhofer", "libmp3lame"];
+    &["lame", "libmp3lame", "qaac", "nero aac", "faac", "fdk-aac", "fraunhofer", "gogo", "xing", "blade"];
+
+/// Only tag keys naming the *encoding tool* are scanned. Free-text fields are not:
+/// matching against every value in the file meant a track whose comment happened to read
+/// "ripped from CD with iTunes" — or an album titled after a codec — was scored as a
+/// transcode on the strength of prose. Substring-matched case-insensitively, so this
+/// covers ENCODER, ENCODED_BY, ENCODER_SETTINGS, MP4's `©too`, and friends.
+const ENCODER_TAG_KEY_MARKERS: &[&str] = &["encoder", "encoded", "encoding", "tool", "software", "too"];
+
+fn is_encoder_tag_key(key: &str) -> bool {
+    let key_lower = key.to_lowercase();
+    ENCODER_TAG_KEY_MARKERS.iter().any(|marker| key_lower.contains(marker))
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +52,9 @@ pub fn scan_for_lossy_encoder_traces(format: &mut Box<dyn FormatReader>) -> Vec<
 
     let mut matches = Vec::new();
     for tag in &revision.media.tags {
+        if !is_encoder_tag_key(&tag.raw.key) {
+            continue;
+        }
         let Some(value_str) = tag_value_as_string(&tag.raw.value) else { continue };
         let value_lower = value_str.to_lowercase();
         for pattern in KNOWN_LOSSY_ENCODER_PATTERNS {
