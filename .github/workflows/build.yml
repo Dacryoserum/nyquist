@@ -1,0 +1,91 @@
+name: CI
+
+# Every check that AGENTS.md requires before a merge, on every push and PR. A red run
+# blocks the merge — that is the point of having it, so please don't merge around it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A new push to the same PR makes the previous run irrelevant.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Cheaper CI builds: nothing here is shipped to users, and incremental output would only
+  # be thrown away between jobs.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  frontend:
+    name: Frontend (svelte-check, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      # `svelte-kit sync` (part of `npm run check`) generates the typed route modules that
+      # both of these depend on, so check must come before build.
+      - run: npm run check
+      - run: npm run build
+
+  backend:
+    name: Backend (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS is the primary target. Windows is here because the release workflow ships a
+        # Windows binary, and a platform nobody builds on is a platform that quietly breaks:
+        # this catches path handling, the `asset://` protocol's different host on Windows,
+        # and any dependency that turns out not to be as portable as assumed. The corpus
+        # fixtures are committed, so the tests need no ffmpeg on either runner.
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # Keyed on the lockfile so a dependency bump invalidates it and nothing else does.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      # Tauri's build script needs the frontend dist directory to exist, even for a plain
+      # `cargo build` that never serves it.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      - name: cargo build
+        working-directory: src-tauri
+        run: cargo build --locked
+
+      # A clippy warning on DSP code is frequently a real numeric bug (truncation,
+      # precision loss, operator precedence on floats), which is why this is -D warnings
+      # and covers tests too.
+      - name: cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      # Includes the corpus false-positive/false-negative report. The fixtures are
+      # committed, so this needs no ffmpeg on the runner — only regenerating them does.
+      - name: cargo test
+        working-directory: src-tauri
+        run: cargo test --locked --release -- --nocapture
