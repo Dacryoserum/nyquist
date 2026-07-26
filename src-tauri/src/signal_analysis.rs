@@ -2,6 +2,7 @@
 //! `.claude/skills/dsp-correctness/SKILL.md` before touching this file.
 
 use ebur128::{EbuR128, Mode};
+use rayon::prelude::*;
 use serde::Serialize;
 
 use crate::decode::DecodedAudio;
@@ -9,6 +10,20 @@ use crate::decode::DecodedAudio;
 /// Floor used instead of -inf/NaN for digital silence, since serde_json cannot serialize
 /// non-finite floats.
 const SILENCE_FLOOR_DB: f64 = -120.0;
+
+/// A sample at or above this counts as clipped.
+///
+/// Not 1.0, and the difference is not cosmetic. Signed PCM is asymmetric: 16-bit runs
+/// -32768..=+32767, and decoders (symphonia included) normalize by the negative bound, so
+/// positive full scale arrives as 32767/32768 = 0.99997 and negative full scale as exactly
+/// -1.0. Testing `abs() >= 1.0` therefore counted every clipped sample on the negative
+/// half of the waveform and none on the positive half — verified against a fixture holding
+/// 1000 samples at +32767 and 1000 at -32768, which reported 1000 instead of 2000.
+///
+/// One LSB of 16-bit headroom below full scale catches both bounds at every common depth
+/// (16/24/32-bit), while staying far enough above normal peaks that ordinary loud-but-
+/// unclipped material is unaffected.
+const CLIPPING_THRESHOLD: f32 = 1.0 - 1.0 / 32768.0;
 
 fn linear_to_db(value: f64) -> f64 {
     if value <= 1e-10 {
@@ -47,51 +62,77 @@ pub struct SignalAnalysis {
 }
 
 pub fn analyze_signal(decoded: &DecodedAudio) -> Result<SignalAnalysis, String> {
+    // Channels are independent for these reductions, and the loudness metering below is a
+    // separate traversal again — so run the cheap per-channel statistics alongside the
+    // expensive `ebur128` work rather than one after the other.
+    let (channel_results, loudness) = rayon::join(
+        || {
+            decoded
+                .channel_samples
+                .par_iter()
+                .enumerate()
+                .map(|(idx, samples)| {
+                    let mut peak_linear: f64 = 0.0;
+                    let mut sum_squares: f64 = 0.0;
+                    let mut clipping_count = 0usize;
+
+                    for &s in samples {
+                        let abs = s.abs() as f64;
+                        peak_linear = peak_linear.max(abs);
+                        sum_squares += (s as f64) * (s as f64);
+                        // Full-scale clip, not an arbitrary epsilon — see
+                        // CLIPPING_THRESHOLD docs for why this is one LSB below 1.0.
+                        if s.abs() >= CLIPPING_THRESHOLD {
+                            clipping_count += 1;
+                        }
+                    }
+
+                    let rms_linear = if samples.is_empty() {
+                        0.0
+                    } else {
+                        (sum_squares / samples.len() as f64).sqrt()
+                    };
+                    let peak_dbfs = linear_to_db(peak_linear);
+                    let rms_dbfs = linear_to_db(rms_linear);
+
+                    (
+                        ChannelStats {
+                            channel: idx + 1,
+                            peak_dbfs,
+                            rms_dbfs,
+                            crest_factor_db: peak_dbfs - rms_dbfs,
+                            clipping_count,
+                        },
+                        peak_linear,
+                        sum_squares,
+                        samples.len(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        },
+        || measure_loudness(decoded),
+    );
+
     let mut per_channel = Vec::with_capacity(decoded.channels);
     let mut overall_peak_linear: f64 = 0.0;
     let mut clipping_count_total = 0usize;
     let mut total_sum_sq: f64 = 0.0;
     let mut total_samples: usize = 0;
 
-    for (idx, samples) in decoded.channel_samples.iter().enumerate() {
-        let mut peak_linear: f64 = 0.0;
-        let mut sum_squares: f64 = 0.0;
-        let mut clipping_count = 0usize;
-
-        for &s in samples {
-            let abs = s.abs() as f64;
-            peak_linear = peak_linear.max(abs);
-            sum_squares += (s as f64) * (s as f64);
-            // Full-scale clip, not an arbitrary epsilon — see dsp-correctness skill.
-            if abs >= 1.0 {
-                clipping_count += 1;
-            }
-        }
-
-        let rms_linear =
-            if samples.is_empty() { 0.0 } else { (sum_squares / samples.len() as f64).sqrt() };
-
-        let peak_dbfs = linear_to_db(peak_linear);
-        let rms_dbfs = linear_to_db(rms_linear);
-
-        per_channel.push(ChannelStats {
-            channel: idx + 1,
-            peak_dbfs,
-            rms_dbfs,
-            crest_factor_db: peak_dbfs - rms_dbfs,
-            clipping_count,
-        });
-
+    // Folded back in channel order, and the sum of squares is accumulated in the same
+    // order as before, so the pooled RMS is bit-identical to the sequential version.
+    for (stats, peak_linear, sum_squares, len) in channel_results {
         overall_peak_linear = overall_peak_linear.max(peak_linear);
-        clipping_count_total += clipping_count;
+        clipping_count_total += stats.clipping_count;
         total_sum_sq += sum_squares;
-        total_samples += samples.len();
+        total_samples += len;
+        per_channel.push(stats);
     }
 
     let overall_rms_linear =
         if total_samples == 0 { 0.0 } else { (total_sum_sq / total_samples as f64).sqrt() };
 
-    let (lufs_integrated, loudness_range_lu, true_peak_dbtp) = measure_loudness(decoded)?;
+    let (lufs_integrated, loudness_range_lu, true_peak_dbtp) = loudness?;
 
     Ok(SignalAnalysis {
         peak_dbfs: linear_to_db(overall_peak_linear),
@@ -106,31 +147,51 @@ pub fn analyze_signal(decoded: &DecodedAudio) -> Result<SignalAnalysis, String> 
 
 /// LUFS, LRA (EBU R128 / EBU Tech 3342 / ITU-R BS.1770), and True Peak via `ebur128` — see
 /// AGENTS.md "Décisions actées". Do not hand-roll K-weighting, gating, or oversampling here.
+///
+/// Runs on two meters rather than one. A single `Mode::I | Mode::LRA | Mode::TRUE_PEAK`
+/// meter does both the K-weighting filter chain and the 4x polyphase oversampling in one
+/// sequential traversal, and that traversal was 53% of the whole pipeline. Split, each
+/// meter does strictly less work than the combined one (the loudness meter skips
+/// oversampling, the true-peak meter skips K-weighting and gating) and the two run
+/// concurrently.
+///
+/// This is a scheduling change, not a numerical one: each mode still sees every sample of
+/// every channel through the same library code, so the values are unchanged. What must
+/// *not* be done instead is splitting by channel — BS.1770 sums weighted channel powers
+/// before gating, so per-channel meters could not be recombined into a correct integrated
+/// loudness.
 fn measure_loudness(decoded: &DecodedAudio) -> Result<(Option<f64>, Option<f64>, f64), String> {
     if decoded.channels == 0 || decoded.sample_rate == 0 {
         return Ok((None, None, SILENCE_FLOOR_DB));
     }
 
-    let mut meter =
-        EbuR128::new(decoded.channels as u32, decoded.sample_rate, Mode::I | Mode::LRA | Mode::TRUE_PEAK)
-            .map_err(|e| format!("could not initialize loudness meter: {e}"))?;
-
     let channel_refs: Vec<&[f32]> = decoded.channel_samples.iter().map(|c| c.as_slice()).collect();
-    meter
-        .add_frames_planar_f32(&channel_refs)
-        .map_err(|e| format!("loudness analysis failed: {e}"))?;
 
-    let lufs_integrated = match meter.loudness_global() {
+    let run = |mode: Mode| -> Result<EbuR128, String> {
+        let mut meter = EbuR128::new(decoded.channels as u32, decoded.sample_rate, mode)
+            .map_err(|e| format!("could not initialize loudness meter: {e}"))?;
+        meter
+            .add_frames_planar_f32(&channel_refs)
+            .map_err(|e| format!("loudness analysis failed: {e}"))?;
+        Ok(meter)
+    };
+
+    let (loudness_meter, true_peak_meter) =
+        rayon::join(|| run(Mode::I | Mode::LRA), || run(Mode::TRUE_PEAK));
+    let loudness_meter = loudness_meter?;
+    let true_peak_meter = true_peak_meter?;
+
+    let lufs_integrated = match loudness_meter.loudness_global() {
         Ok(lufs) if lufs.is_finite() => Some(lufs),
         _ => None,
     };
-    let loudness_range_lu = match meter.loudness_range() {
+    let loudness_range_lu = match loudness_meter.loudness_range() {
         Ok(lra) if lra.is_finite() => Some(lra),
         _ => None,
     };
 
     let true_peak_linear = (0..decoded.channels)
-        .map(|ch| meter.true_peak(ch as u32).unwrap_or(0.0))
+        .map(|ch| true_peak_meter.true_peak(ch as u32).unwrap_or(0.0))
         .fold(0.0_f64, f64::max);
 
     Ok((lufs_integrated, loudness_range_lu, linear_to_db(true_peak_linear)))

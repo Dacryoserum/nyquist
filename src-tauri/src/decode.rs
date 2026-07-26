@@ -31,6 +31,13 @@ pub struct DecodedAudio {
     /// Container tag values matching a known lossy-encoder signature — see tags.rs
     /// module docs on why this is weaker evidence than the spectral indicators.
     pub encoder_tag_matches: Vec<EncoderTagMatch>,
+    /// Packets the decoder rejected and this module skipped over. Non-zero means the file
+    /// is damaged and the analysis ran on incomplete audio: every downstream measurement
+    /// silently describes a shorter, gap-ridden version of the track. Skipping bad packets
+    /// is the right recovery — a corrupt tail shouldn't fail the whole analysis — but
+    /// doing it without telling anyone would hide exactly the defect an integrity check
+    /// exists to surface.
+    pub decode_errors: usize,
 }
 
 pub fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
@@ -77,6 +84,7 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
     let mut channels: usize = 0;
     let mut channel_samples: Vec<Vec<f32>> = Vec::new();
     let mut interleaved_buf: Vec<f32> = Vec::new();
+    let mut decode_errors: usize = 0;
 
     loop {
         let packet = match format.next_packet() {
@@ -94,7 +102,10 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
 
         let audio_buf = match decoder.decode(&packet) {
             Ok(buf) => buf,
-            Err(SymphoniaError::IoError(_)) | Err(SymphoniaError::DecodeError(_)) => continue,
+            Err(SymphoniaError::IoError(_)) | Err(SymphoniaError::DecodeError(_)) => {
+                decode_errors += 1;
+                continue;
+            }
             Err(e) => return Err(format!("decode error: {e}")),
         };
 
@@ -130,5 +141,6 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
         channel_samples,
         integrity_verified,
         encoder_tag_matches,
+        decode_errors,
     })
 }
