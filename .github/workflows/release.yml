@@ -1,8 +1,13 @@
 name: Release
 
-# Builds the distributable artifacts for a version tag and attaches them to a draft GitHub
-# release. Draft, not published: someone has to download each artifact, open it on a clean
-# machine, and confirm the OS gatekeeping behaves as documented before users see it.
+# Builds the distributable artifacts for a version tag and publishes them as a GitHub
+# release.
+#
+# Published directly rather than as a draft, by choice: the artifacts go live as soon as the
+# build finishes, without anyone having opened them on a clean machine first. Since neither
+# binary is code-signed, the OS gatekeeping paths described in the release notes below are
+# therefore documented rather than verified per release — worth re-checking by hand after a
+# change to packaging, signing, or the Tauri version.
 on:
   push:
     tags: ["v*"]
@@ -109,5 +114,5 @@ jobs:
               you prefer; they install the same application.
 
             Nothing you analyze leaves your machine — the app does no network I/O.
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
