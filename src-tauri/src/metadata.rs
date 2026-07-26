@@ -27,6 +27,9 @@ pub struct FileInfo {
     /// STREAMINFO MD5). `Some(false)`: mismatch — the file is corrupt/truncated/edited.
     /// `None`: this codec has no such embedded checksum (MP3, AAC, WAV, ...).
     pub integrity_verified: Option<bool>,
+    /// Packets that failed to decode and were skipped. Non-zero means every measurement
+    /// in this report describes damaged, incomplete audio — see `decode.rs`.
+    pub decode_errors: usize,
 }
 
 pub fn build_file_info(path: &Path, decoded: &DecodedAudio) -> Result<FileInfo, String> {
@@ -60,5 +63,6 @@ pub fn build_file_info(path: &Path, decoded: &DecodedAudio) -> Result<FileInfo, 
         sample_count,
         bitrate_kbps,
         integrity_verified: decoded.integrity_verified,
+        decode_errors: decoded.decode_errors,
     })
 }
