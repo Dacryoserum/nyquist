@@ -6,6 +6,7 @@ pub mod bit_depth;
 pub mod decode;
 pub mod dynamic_range;
 pub mod metadata;
+pub mod sample_rate;
 pub mod signal_analysis;
 pub mod spectral;
 pub mod tags;
