@@ -42,6 +42,9 @@ export interface FileInfo {
    * this codec has none (MP3/AAC/WAV) or this particular file didn't have one embedded
    * (common on re-tagged FLACs) — check `codec === "flac"` to tell those apart. */
   integrity_verified: boolean | null;
+  /** Packets that failed to decode and were skipped. Non-zero means every measurement in
+   * this report describes damaged, incomplete audio. */
+  decode_errors: number;
 }
 
 export interface SpectrogramData {
@@ -54,9 +57,13 @@ export interface SpectrogramData {
 }
 
 export interface SpectralAnalysis {
-  /** Raw measurement, not a transcode verdict — see spectral.rs module docs. */
+  /** Where content stops: the lowpass edge if there is one, otherwise Nyquist. Raw
+   * measurement, not a transcode verdict — see spectral.rs module docs. */
   spectral_cutoff_hz: number;
   rolloff_steepness_db_per_khz: number;
+  /** Position of the codec-like edge, or null when no lowpass exists anywhere above 8 kHz
+   * — the latter being the evidence behind a "probably authentic" verdict. */
+  encoder_edge_hz: number | null;
   /** Same length/time alignment as spectrogram.time_bin_count. */
   cutoff_over_time_hz: number[];
   spectrogram: SpectrogramData;
@@ -81,8 +88,22 @@ export interface EncoderTagMatch {
 export interface BitDepthAnalysis {
   declared_bit_depth: number | null;
   /** Smallest bit depth that explains ~all samples. Equal to declared_bit_depth in the
-   * normal case; lower means the file was likely zero-padded to look deeper than it is. */
+   * normal case; lower means the file was likely zero-padded to look deeper than it is.
+   * null means unverifiable — either no declared depth, or a declared depth above the 24
+   * bits an f32 decode can carry. */
   effective_bit_depth: number | null;
+}
+
+/** The sample-rate counterpart to BitDepthAnalysis: a file resampled up to a hi-res rate
+ * it never earns. Lossless throughout, so invisible to the transcode verdict. */
+export interface SampleRateAnalysis {
+  declared_sample_rate_hz: number;
+  content_bandwidth_hz: number;
+  /** content_bandwidth_hz as a fraction of the declared Nyquist. */
+  bandwidth_ratio: number;
+  likely_upsampled: boolean;
+  /** Smallest standard rate that would carry this content losslessly, when flagged. */
+  sufficient_sample_rate_hz: number | null;
 }
 
 export interface AnalysisResult {
@@ -93,6 +114,7 @@ export interface AnalysisResult {
   transcode_assessment: TranscodeAssessment;
   encoder_tag_matches: EncoderTagMatch[];
   bit_depth_analysis: BitDepthAnalysis;
+  sample_rate_analysis: SampleRateAnalysis;
 }
 
 export function analyzeFile(path: string): Promise<AnalysisResult> {

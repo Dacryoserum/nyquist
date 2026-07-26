@@ -23,7 +23,13 @@ export const icons = {
   pause: `<path d="M8 5v14M16 5v14" stroke-width="2.4"/>`,
   shield: `<path d="M12 3l7 3v5.5c0 4.6-3 8.3-7 9.5-4-1.2-7-4.9-7-9.5V6l7-3z"/>`,
   download: `<path d="M12 4v12M7 11l5 5 5-5"/><path d="M4 19h16"/>`,
-  tag: `<path d="M20 12l-8 8-9-9V4h7l10 10z"/><path d="M8 8v.01"/>`
+  tag: `<path d="M20 12l-8 8-9-9V4h7l10 10z"/><path d="M8 8v.01"/>`,
+  waveform: `<path d="M2 12h3l2-6 3 13 3-9 2 4 3-3h4"/>`,
+  ruler: `<path d="M3 8h18v8H3z"/><path d="M7 8v3M11 8v5M15 8v3M19 8v5"/>`,
+  sun: `<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4"/>`,
+  moon: `<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/>`,
+  alertTriangle: `<path d="M12 4l9 16H3z"/><path d="M12 10v4"/><path d="M12 17.2v.01"/>`,
+  refresh: `<path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20 4v4h-4"/>`
 } as const;
 
 export type IconName = keyof typeof icons;
