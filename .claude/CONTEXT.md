@@ -90,6 +90,120 @@ resurveiller si un futur ajout alourdit encore le pipeline (le CLI, `nyquist-cli
 partage exactement ce même pipeline via `analysis.rs` — pratique pour rebencher vite :
 `time nyquist-cli fichier.flac`).
 
+## Les deux façons dont une mesure de pente spectrale ment (trouvées 2026-07-25, corrigées)
+
+Audit complet du pipeline. Les deux défauts venaient de la *même* fonction
+(`measure_rolloff_steepness`) et se compensaient assez pour passer inaperçus sur le corpus
+d'origine — qui ne contenait ni contenu tonal, ni silence, ni fichier sur-échantillonné.
+
+1. **Saturation sur contenu tonal → faux positif confiant.** L'ancienne méthode divisait une
+   chute fixe (35 dB) par l'écart de fréquence entre deux seuils. Sur du contenu tonal cet
+   écart tombe sous la résolution FFT → branche dégénérée `span < 0.1` → 350 dB/kHz →
+   « probablement transcodé, 80 % ». **La sinusoïde de `calibration/` était elle-même
+   classée transcodée.** Le correctif de 2026-07-24 mentionné plus bas n'avait traité que la
+   moitié « aucune coupure » du problème, pas la moitié « contenu étroit ».
+2. **Le plancher dB au-dessus de la bande atténuée → faux négatif silencieux.** `linear_to_db`
+   plafonnait à `DB_FLOOR = -90`, alors que la bande atténuée d'un encodeur lossy est vers
+   -140 dB. Le silence numérique (zéros exacts → -90 dans *toutes* les bandes) relevait donc
+   le plancher moyen au-dessus de la coupure à mesurer. 5 s de silence sur un LAME 128 :
+   191 → 0 dB/kHz, verdict « transcodé » → « indéterminé ». Presque tout morceau réel
+   commence ou finit dans le silence, donc la détection était éteinte en usage réel.
+
+**Leçon réutilisable : ne jamais mesurer une pente en divisant par un écart de fréquence
+mesuré** — l'écart peut tendre vers zéro pour des raisons qui n'ont rien à voir avec une
+coupure. Mesurer une chute bornée sur une fenêtre *fixe* de part et d'autre. Et garder le
+plancher de mesure (`ANALYSIS_FLOOR_DB`, -180) distinct du plancher d'affichage (-90) : les
+confondre enterre le signal recherché sous le silence.
+
+Largeur de fenêtre choisie par balayage 300/500/1000 Hz sur le corpus : 300 Hz sépare mieux
+(12 vs 135 dB/kHz) mais suppose que la coupure détectée tombe pile sur le filtre, ce qui tient
+sur du synthétique et beaucoup moins sur de la vraie musique. 500 Hz garde ~5x de séparation
+en moyennant sur ~46 bins.
+
+## Cross-validation : réimplémenter la mesure en numpy avant de conclure
+
+Pour les deux bugs ci-dessus, une réimplémentation Python/numpy fidèle de `spectral.rs`
+(même STFT 4096/hop 2048, même downmix, même domaine) a servi de référence indépendante :
+elle reproduit exactement les valeurs Rust (191 dB/kHz sur mp3_128) une fois le plancher
+traité pareil, ce qui prouve que l'écart observé venait de l'algorithme et non d'un détail
+d'implémentation. **Attention au piège rencontré : clamper à -90 dans la référence donnait
+des résultats différents** et envoyait sur une fausse piste — reproduire le comportement de
+plancher *exactement* avant de comparer.
+
+## Le PCM signé est asymétrique — conséquence sur toute détection de plein échelle
+
+16 bits couvrent -32768..=+32767 et les décodeurs (symphonia inclus) normalisent par la borne
+négative : le plein échelle **positif** arrive à 32767/32768 = 0,99997, le négatif à -1,0
+exactement. Un test `abs() >= 1.0` ne voit donc *que* le versant négatif — le clipping était
+compté à moitié. Seuil correct : un LSB sous 1,0. Vaut pour toute future mesure « au plein
+échelle » (inter-sample peaks, détection de saturation).
+
+## Le décodage en f32 plafonne toute analyse de profondeur à 24 bits
+
+La mantisse f32 porte 24 bits significatifs. Au-delà, l'information de poids faible est déjà
+perdue au décodage : un fichier 32 bits *paraît* aligné sur une grille plus grossière que
+déclarée, ce qui produirait un « faux hi-res » inventé. `bit_depth.rs` répond donc `None`
+au-dessus de 24 bits plutôt qu'un résultat confiant. Si un jour l'analyse doit couvrir le
+32 bits réel, il faudra un chemin de décodage entier/f64, pas un ajustement de seuil.
+
+## Parallélisme : ce qui a payé, et ce qui a coûté (mesuré 2026-07-25)
+
+Fichier de référence : FLAC 96 kHz/24 bits stéréo, 8 minutes. Profil release avec
+`lto = "fat"` + `codegen-units = 1`. Se re-mesure avec `nyquist-cli --timing <fichier>`.
+
+Répartition initiale : decode 1571 ms | **signal 3044 ms** | DR14 140 | spectral 783 |
+bit-depth 195 | **total 5734 ms**. Le décodage est séquentiel par nature (bitstream FLAC),
+donc le seul levier est l'après-décodage.
+
+Ce qui a marché :
+- **Les 4 étapes post-décodage ne dépendent que de `decoded`, pas les unes des autres.**
+  Les lancer en `rayon::join` imbriqué met le temps du groupe au niveau du plus lent au
+  lieu de la somme.
+- **Deux mètres `ebur128` au lieu d'un.** Un mètre `I | LRA | TRUE_PEAK` fait le
+  K-weighting *et* le suréchantillonnage polyphase dans une seule traversée séquentielle.
+  Séparé en `I | LRA` et `TRUE_PEAK`, chaque mètre fait strictement moins de travail et les
+  deux tournent en parallèle. **Ne jamais découper par canal en revanche** : BS.1770 somme
+  les puissances pondérées des canaux *avant* le gating, des mètres par canal ne se
+  recombinent pas.
+
+Ce qui a coûté et a été annulé :
+- **Paralléliser la boucle FFT.** Gain local réel (850 → 620 ms) mais **le total empire**
+  (3,67 → 3,88 s) : spectral n'est pas sur le chemin critique, et ses workers volent des
+  cœurs à la chaîne de filtres true-peak qui, elle, ne peut pas être découpée. Leçon :
+  paralléliser une étape hors chemin critique est une régression, pas une optimisation.
+- **Downmix mono à la volée avec une boucle générique sur `Vec<Vec<f32>>`.** Économise bien
+  les 184 Mo du buffer mono, mais coûtait plus de CPU qu'il n'en faisait gagner. Récupéré en
+  spécialisant les cas 1 et 2 canaux (passe vectorisable) — garder cette spécialisation si
+  cette boucle est retouchée.
+
+Résultat : **5734 → ~3770 ms (-34 %)**, valeurs strictement identiques sur les 16 fichiers
+de contrôle (vérifié en comparant le JSON complet à pleine précision avant/après — à refaire
+pour tout changement de parallélisme, c'est le seul garde-fou contre un réordonnancement qui
+change un flottant).
+
+**Variance Apple Silicon** : ~4,3 s observé ponctuellement contre ~3,8 s typique. Les cœurs
+P/E ne sont pas distingués par rayon, et un thread critique atterrissant sur un cœur
+d'efficacité change le résultat. Toujours mesurer plusieurs fois avant de conclure à une
+régression.
+
+## Mémoire : le pipeline charge tout le fichier, et ça se voit sur du hi-res
+
+Mesuré sur un FLAC 96 kHz/24 bits stéréo de 8 minutes : **1,73 Go de pic RSS** avant
+correction, dont ~737 Mo pour le seul `Vec<i64>` que `bit_depth.rs` matérialisait sur tous les
+échantillons de tous les canaux. Remplacé par un histogramme de bits de poids faible en une
+passe (l'alignement sur une grille `2^k` équivaut à « au moins k zéros de poids faible », donc
+une passe répond pour tous les candidats à la fois) → **953 Mo**. Puis suppression du buffer
+mono pleine longueur (downmix fait fenêtre par fenêtre dans `spectral.rs`) → **845 Mo**, soit
+**-51 % par rapport aux 1,73 Go d'origine**. `frames_db` est passé d'un `Vec<Vec<f32>>` (une
+allocation par trame, 22 500 sur ce fichier) à un seul buffer contigu — même volume, mais une
+allocation et une bien meilleure localité pour les balayages qui parcourent une bande à
+travers toutes les trames.
+
+Restent en mémoire simultanée : `channel_samples` (~369 Mo ici) et `frames_db` (~184 Mo). Un
+192 kHz ou un long mouvement classique reste un risque : le vrai correctif serait un pipeline
+en streaming (analyser par blocs pendant le décodage au lieu de tout charger), ce qui est un
+refactor structurel, pas un réglage.
+
 ## Position du spectral cutoff seule = trompeuse sur de vraie musique (a motivé le second indicateur)
 
 Sur un extrait réel (Hans Zimmer, passage orchestral calme) : coupure ~7.5kHz **identique
@@ -212,4 +326,9 @@ pour les early adopters en attendant. Voir la skill `release-packaging`.
 - **Node 18.20.3** (nvm) — suffisant pour Vite 6 / SvelteKit 2 / Svelte 5 utilisés ici.
 - Scaffold initial généré via `npm create tauri-app@latest . -- -m npm -t svelte-ts
   --identifier com.nyquist.app -y -f` (le `-f` force l'écriture dans un dossier non vide,
-  nécessaire ici car `AGENTS.md`/`.claude/`/etc. existaient déjà).
+  nécessaire ici car `AGENTS.md`/`.claude/`/etc. existaient déjà). **L'identifiant a depuis
+  été changé en `com.nyquist.analyzer`** : `tauri build` avertit qu'un identifiant finissant
+  par `.app` entre en conflit avec l'extension de bundle macOS. Corrigé avant toute release,
+  donc sans dette — mais ne pas le re-changer après la première release publique, c'est
+  l'identité de l'app pour macOS (préférences, permissions, mises à jour).
+

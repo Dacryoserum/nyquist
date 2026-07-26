@@ -1,0 +1,113 @@
+name: Release
+
+# Builds the distributable artifacts for a version tag and attaches them to a draft GitHub
+# release. Draft, not published: someone has to download each artifact, open it on a clean
+# machine, and confirm the OS gatekeeping behaves as documented before users see it.
+on:
+  push:
+    tags: ["v*"]
+  # Also runnable by hand, so the packaging path can be exercised without minting a tag.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  # Cheap gate: fail in seconds rather than after two platform builds if the version fields
+  # have drifted apart. They must move together in one commit — see the release-packaging
+  # skill.
+  version-check:
+    name: Version consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Cargo.toml, tauri.conf.json, package.json and the tag agree
+        run: |
+          CARGO_V=$(grep -m1 '^version' src-tauri/Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          TAURI_V=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          PKG_V=$(node -p "require('./package.json').version")
+          echo "Cargo.toml=$CARGO_V tauri.conf.json=$TAURI_V package.json=$PKG_V"
+          if [ "$CARGO_V" != "$TAURI_V" ] || [ "$CARGO_V" != "$PKG_V" ]; then
+            echo "::error::Version mismatch between Cargo.toml, tauri.conf.json and package.json"
+            exit 1
+          fi
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$CARGO_V" ]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} does not match project version $CARGO_V"
+            exit 1
+          fi
+
+  build:
+    needs: version-check
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One platform failing should still produce the other's artifact rather than leaving
+      # the release with nothing in it.
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            label: macOS (universal)
+            # A universal binary needs both slices built explicitly; the runner only has its
+            # own architecture installed by default, and shipping a single-arch app named as
+            # if it were universal is exactly the trap the release-packaging skill warns about.
+            rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
+            args: --target universal-apple-darwin
+          - os: windows-latest
+            label: Windows (x64)
+            rust-targets: ""
+            # No target override: the runner is already x64, and Tauri picks the MSI and
+            # NSIS bundles from `bundle.targets: "all"`.
+            args: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-targets }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src-tauri/target
+          key: ${{ matrix.os }}-release-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-release-cargo-
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          args: ${{ matrix.args }}
+          tagName: ${{ github.ref_name }}
+          releaseName: Nyquist ${{ github.ref_name }}
+          # Stated on the release itself rather than left for users to discover. Neither
+          # platform's binary is code-signed: macOS notarization needs a paid Apple Developer
+          # account and Windows needs a purchased code-signing certificate. Both decisions are
+          # deliberately still open (see .claude/CONTEXT.md), so until they are made the
+          # workarounds have to be documented where people download the files.
+          releaseBody: |
+            See `CHANGELOG.md` for what changed.
+
+            **These builds are not code-signed.**
+
+            - **macOS** — Gatekeeper will refuse the app on first launch, reporting an
+              unidentified developer. Right-click (or Control-click) Nyquist.app and choose
+              **Open**, then confirm. Once per install. The `.dmg` is a universal binary and
+              runs natively on both Apple Silicon and Intel Macs.
+            - **Windows** — SmartScreen will show "Windows protected your PC". Click **More
+              info** → **Run anyway**. Take the `.msi` or the NSIS `-setup.exe`, whichever
+              you prefer; they install the same application.
+
+            Nothing you analyze leaves your machine — the app does no network I/O.
+          releaseDraft: true
+          prerelease: false
