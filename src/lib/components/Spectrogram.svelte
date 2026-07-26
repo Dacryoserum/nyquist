@@ -186,8 +186,10 @@
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    font-size: 0.7rem;
-    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    color: var(--ink-low);
     padding: 0.25rem 0;
     text-align: right;
     min-width: 2.5rem;
@@ -196,9 +198,9 @@
   .canvas-wrap {
     position: relative;
     flex: 1;
-    border-radius: 8px;
+    border-radius: 3px;
     overflow: hidden;
-    border: 1px solid var(--border);
+    border: 1px solid var(--ink-hair);
   }
 
   .canvas-wrap.seekable {
@@ -210,7 +212,7 @@
     top: 0;
     bottom: 0;
     width: 2px;
-    background: var(--accent, #e2a385);
+    background: var(--ink-hi);
     pointer-events: none;
     box-shadow: 0 0 4px rgba(0, 0, 0, 0.5);
   }
@@ -218,7 +220,9 @@
   canvas {
     display: block;
     width: 100%;
-    height: 220px;
+    /* The spectrogram is the one view that *shows* the verdict rather than asserting it,
+       so it gets the vertical space to be read rather than glanced at. */
+    height: 300px;
     image-rendering: pixelated;
   }
 
@@ -234,11 +238,13 @@
     position: absolute;
     right: 0.4rem;
     top: -1.1rem;
-    font-size: 0.65rem;
-    color: rgba(255, 255, 255, 0.75);
-    background: rgba(0, 0, 0, 0.35);
-    padding: 0.05rem 0.35rem;
-    border-radius: 4px;
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.06em;
+    color: rgba(255, 255, 255, 0.8);
+    background: rgba(0, 0, 0, 0.45);
+    padding: 0.08rem 0.35rem;
+    border-radius: 2px;
     white-space: nowrap;
   }
 
@@ -260,8 +266,10 @@
   .time-axis {
     display: flex;
     justify-content: space-between;
-    font-size: 0.7rem;
-    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    color: var(--ink-low);
     padding-left: 3rem;
   }
 
@@ -276,8 +284,8 @@
   .legend-bar {
     flex: 1;
     max-width: 260px;
-    height: 8px;
-    border-radius: 4px;
+    height: 6px;
+    border-radius: 2px;
     background: linear-gradient(
       90deg,
       rgb(0, 0, 4) 0%,
@@ -289,7 +297,10 @@
   }
 
   .legend-label {
-    font-size: 0.72rem;
-    color: var(--muted);
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-low);
   }
 </style>
