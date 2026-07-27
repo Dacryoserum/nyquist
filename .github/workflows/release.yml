@@ -94,15 +94,20 @@ jobs:
           cache: npm
       - run: npm ci
 
-      - uses: actions/cache@v4
+      # Purpose-built for Rust: caches registry and dependency artifacts but not this
+      # workspace's own output, which changes on every commit and made the plain
+      # `target/` cache slow to save (1m42 on Windows) for little benefit.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            src-tauri/target
-          key: ${{ matrix.os }}-release-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
-          restore-keys: ${{ matrix.os }}-release-cargo-
+          workspaces: src-tauri
+          prefix-key: release
+
+      # tauri-action uploads everything it finds under bundle/, so a stale artifact
+      # restored from cache ends up attached to the release. A v0.1.0 built with
+      # `--bundles nsis` shipped an .msi from the previous run this way.
+      - name: Remove stale bundles
+        shell: bash
+        run: rm -rf src-tauri/target/*/release/bundle src-tauri/target/release/bundle
 
       - uses: tauri-apps/tauri-action@v0
         env:
