@@ -1,0 +1,23 @@
+# The headless CLI lives in its own package, not as a second `[[bin]]` of the app.
+#
+# That is not cosmetic. Tauri copies every binary of the app's package into the macOS
+# `.app`, and `--target universal-apple-darwin` is not a real rustc target: Tauri builds
+# the main binary for both architectures and `lipo`s them together. A second binary is
+# never produced under that path, so bundling failed with
+# `Failed to copy binary from .../universal-apple-darwin/release/nyquist-cli: does not
+# exist`. Windows never hit it because it builds without `--target`.
+#
+# Splitting it out also keeps the CLI out of the shipped `.app`, which has no use for it.
+[package]
+name = "nyquist-cli"
+version = "0.1.0"
+description = "Headless companion to the Nyquist desktop app"
+authors = ["Nyquist contributors"]
+license = "MIT"
+edition = "2021"
+
+[dependencies]
+# The app's package, imported as `nyquist_lib` (its `[lib] name`). Sharing the library is
+# the point: the CLI and the GUI must run the exact same analysis pipeline.
+nyquist = { path = ".." }
+serde_json = "1"

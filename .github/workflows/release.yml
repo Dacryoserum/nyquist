@@ -57,16 +57,32 @@ jobs:
             # own architecture installed by default, and shipping a single-arch app named as
             # if it were universal is exactly the trap the release-packaging skill warns about.
             rust-targets: aarch64-apple-darwin,x86_64-apple-darwin
-            args: --target universal-apple-darwin
+            # `--bundles dmg` keeps the release to a single macOS download. Without it
+            # Tauri also emits a bare .app archive, which is the same application twice.
+            args: --target universal-apple-darwin --bundles dmg
           - os: windows-latest
             label: Windows (x64)
             rust-targets: ""
-            # No target override: the runner is already x64, and Tauri picks the MSI and
-            # NSIS bundles from `bundle.targets: "all"`.
-            args: ""
+            # No target override: the runner is already x64. `--bundles nsis` gives one
+            # installer .exe; the default would also produce an .msi, which installs the
+            # very same application and only makes the download page ambiguous.
+            args: --bundles nsis
 
     steps:
       - uses: actions/checkout@v4
+
+      # Real-time scanning inspects every object file rustc writes, and a cold build writes
+      # tens of thousands. Excluding the build directories is the single biggest lever on
+      # Windows CI time here; the cold release build measured 13m45 without it.
+      - name: Exclude build dirs from Windows Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionProcess "rustc.exe" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionProcess "cargo.exe" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionProcess "link.exe" -ErrorAction SilentlyContinue
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -110,8 +126,7 @@ jobs:
               **Open**, then confirm. Once per install. The `.dmg` is a universal binary and
               runs natively on both Apple Silicon and Intel Macs.
             - **Windows** — SmartScreen will show "Windows protected your PC". Click **More
-              info** → **Run anyway**. Take the `.msi` or the NSIS `-setup.exe`, whichever
-              you prefer; they install the same application.
+              info** → **Run anyway**, then the installer runs normally.
 
             Nothing you analyze leaves your machine — the app does no network I/O.
           releaseDraft: false

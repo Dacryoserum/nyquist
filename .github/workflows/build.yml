@@ -49,6 +49,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Real-time scanning inspects every object file rustc writes; excluding the build
+      # directories is the biggest single lever on Windows CI time. See release.yml.
+      - name: Exclude build dirs from Windows Defender
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Add-MpPreference -ExclusionPath "${{ github.workspace }}" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionProcess "rustc.exe" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionProcess "cargo.exe" -ErrorAction SilentlyContinue
+          Add-MpPreference -ExclusionProcess "link.exe" -ErrorAction SilentlyContinue
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy

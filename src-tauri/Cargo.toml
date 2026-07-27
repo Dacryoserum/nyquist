@@ -1,3 +1,6 @@
+[workspace]
+members = ["cli"]
+
 [package]
 name = "nyquist"
 version = "0.1.0"
@@ -5,10 +8,6 @@ description = "Desktop audio quality analyzer and lossy-to-lossless transcode de
 authors = ["Nyquist contributors"]
 license = "MIT"
 edition = "2021"
-# Two binaries live in this package now (the Tauri GUI app in src/main.rs, and the
-# headless src/bin/nyquist-cli.rs). Without this, plain `cargo run` — which is what
-# Tauri's own dev/build tooling shells out to — can't pick one and errors out.
-default-run = "nyquist"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -46,16 +45,20 @@ base64 = "0.22.1"
 # particular is a sequential filter chain and must stay on one thread.
 rayon = "1.10"
 
-# Distribution profile. This binary ships to strangers, so it is worth the longer build:
-# fat LTO plus a single codegen unit lets the optimizer inline across crate boundaries
-# (which matters for the per-sample loops in signal_analysis/bit_depth), and stripping
-# symbols cuts the shipped size substantially.
+# Distribution profile, applying to every workspace member.
+#
+# `lto = "thin"` rather than "fat", measured rather than assumed: on this dependency graph
+# fat LTO cost 107.6s to build against 75.9s for thin (-30%), for a pipeline runtime that
+# was identical inside the run-to-run noise (3.57-3.90s thin vs 3.67-4.33s fat on the same
+# 8-minute reference file). Windows CI is the slowest link in the release — 13m45 for a
+# cold build — so 30% off the compile for no measurable runtime cost is the right trade.
+# Symbols are stripped, which cuts the shipped size substantially.
 #
 # `panic` is deliberately left at the default `unwind`: `commands::analyze_file` relies on
 # `spawn_blocking` catching a panic and turning it into an error message rather than taking
 # the whole app down with it. `panic = "abort"` would break that recovery.
 [profile.release]
-lto = "fat"
-codegen-units = 1
+lto = "thin"
+codegen-units = 16
 strip = true
 
