@@ -2,7 +2,9 @@
 
 > Status: **early, functional prototype.** Core analysis, spectrogram, a first-pass
 > transcode-likelihood verdict, playback, and a CLI are all working end to end — see
-> [Roadmap](#roadmap) for what's still ahead of a public release. No packaged builds yet.
+> [Roadmap](#roadmap) for what's still ahead. Unsigned macOS/Windows builds are published
+> on [GitHub Releases](https://github.com/Dacryoserum/nyquist/releases) on every tag — see
+> [Installing a release build](#installing-a-release-build).
 
 Nyquist is a cross-platform desktop app for inspecting the real technical quality of an
 audio file — sample rate, bit depth, dynamic range, loudness (LUFS), true peak — and, most
@@ -32,9 +34,9 @@ it off.
 - Signal analysis: peak, true peak (oversampled, ITU-R BS.1770), RMS, integrated loudness
   (LUFS, EBU R128), loudness range (LRA), per-channel clipping, and DR14 (the Pleasurize
   Music Foundation Dynamic Range algorithm this community compares publicly).
-- Renders an interactive spectrogram (FFT) with playback and click-to-seek, and measures
-  the spectral cutoff position, its rolloff steepness, and how the cutoff evolves over
-  the track.
+- Renders an interactive spectrogram (FFT) with playback, click-to-seek, and volume
+  control, and measures the spectral cutoff position, its rolloff steepness, and how the
+  cutoff evolves over the track.
 - Scans encoder tags for leftover lossy-encoder signatures (LAME, qaac, FhG, ...). Only
   the tags naming the encoding tool are read, and only encoders that exclusively produce
   lossy output count — iTunes, for instance, is one of the most common *lossless* CD
@@ -56,6 +58,7 @@ it off.
 - Exports the full analysis as a JSON report.
 - Ships a headless CLI (`nyquist-cli`) for scripting/batch use, sharing the exact same
   analysis pipeline as the desktop app.
+- UI in French by default, with a discreet toggle to switch to English.
 
 ## Tech stack
 

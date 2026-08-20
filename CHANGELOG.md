@@ -6,6 +6,12 @@ releases start shipping.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-20
+
+First tagged release. Everything below predates a public version number — see
+`.claude/CLAUDE.md` for the project's actual phase (V0.1 → V0.3 first slices, plus audio
+playback and the "advanced audiophile" feature set, all already in place before this tag).
+
 ### Corrigé
 
 - **Le contenu tonal n'est plus accusé à tort.** `measure_rolloff_steepness` divisait une
@@ -54,6 +60,14 @@ releases start shipping.
   transcodage entouré de silence, fichier réellement sur-échantillonné, et la combinaison
   lossy + sur-échantillonné. Plus une fixture de calibration à plein échelle sur les deux
   polarités.
+- **Interface en français par défaut**, avec un bouton discret en haut à droite de la
+  barre du haut pour basculer en anglais (persisté en local, aucune requête réseau). Tout
+  le texte de l'interface — dashboard, constats, lecteur, spectrogramme — passe par un
+  dictionnaire partagé (`src/lib/i18n.svelte.ts`) ; les nombres suivent aussi la
+  convention décimale de la langue active (virgule en français). Les messages d'erreur
+  bruts renvoyés par le backend restent non traduits (texte technique de diagnostic).
+- **Contrôle de volume sur le lecteur audio** : bouton muet + curseur, à côté de la barre
+  de progression existante, avec le volume choisi mémorisé d'une session à l'autre.
 
 ### Performance
 
@@ -97,6 +111,11 @@ précision) — ces changements réordonnancent le travail, ils ne changent aucu
 
 ### Modifié
 
+- **Icône de l'application** remplacée : le logo par défaut généré par `npm create
+  tauri-app` (cercles teal/jaune, sans rapport avec l'app) laisse place à un dessin dans le
+  thème réel de l'interface — carré arrondi sombre (`--bg`) avec des barres de spectre
+  colorées par le dégradé inferno de `src/lib/colormap.ts`, la seule vraie surface de
+  couleur de l'app. Régénérée pour toutes les plateformes via `tauri icon`.
 - L'indicateur de chargement est remplacé par l'orbe « composing » de
   [thinking-orbs](https://orbs.jakubantalik.com) (Jakub Antalik, MIT) : une sphère de points
   traversée d'une écharpe ondulante, à la place du cercle tournant. Le paquet est un composant
