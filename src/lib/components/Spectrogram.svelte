@@ -2,6 +2,9 @@
   import { onMount } from "svelte";
   import type { SpectrogramData } from "$lib/api";
   import { inferno } from "$lib/colormap";
+  import { t } from "$lib/i18n.svelte";
+
+  const T = $derived(t());
 
   let {
     data,
@@ -141,12 +144,12 @@
       onclick={handleSeekClick}
       onkeydown={handleSeekKeydown}
       role="button"
-      aria-label="Click to seek playback position"
+      aria-label={T.spectrogram.seekAria}
       tabindex={0}
     >
-      <canvas bind:this={canvas} aria-label="Spectrogram"></canvas>
+      <canvas bind:this={canvas} aria-label={T.spectrogram.canvasAria}></canvas>
       <div class="cutoff-line" style:top="{cutoffLinePercent}%">
-        <span class="cutoff-label">raw cutoff ~{fmtFreq(spectralCutoffHz)}Hz</span>
+        <span class="cutoff-label">{T.spectrogram.rawCutoff(fmtFreq(spectralCutoffHz))}</span>
       </div>
       {#if cutoffOverTimePoints}
         <svg class="cutoff-trace" viewBox="0 0 100 100" preserveAspectRatio="none">
