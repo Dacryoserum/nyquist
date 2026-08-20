@@ -15,6 +15,7 @@
   import Spectrogram from "$lib/components/Spectrogram.svelte";
   import ThinkingOrb from "$lib/components/ThinkingOrb.svelte";
   import type { IconName } from "$lib/icons";
+  import { fmtNumber, initLang, langState, t, toggleLang } from "$lib/i18n.svelte";
 
   let result = $state<AnalysisResult | null>(null);
   let error = $state<string | null>(null);
@@ -28,11 +29,29 @@
   let isPlaying = $state(false);
   let currentTime = $state(0);
   let scrubbing = $state(false);
+  let volume = $state(1);
+  let muted = $state(false);
+
+  const T = $derived(t());
+
+  // Keeps the document's own `lang` attribute (screen readers, browser spellcheck/translate
+  // prompts) in sync with the in-app toggle — `app.html` only sets the pre-hydration default.
+  $effect(() => {
+    document.documentElement.lang = langState.current;
+  });
 
   onMount(() => {
     const saved = localStorage.getItem("nyquist-theme");
     theme = saved === "light" || saved === "dark" ? saved : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
     applyTheme();
+    initLang();
+
+    try {
+      const savedVolume = localStorage.getItem("nyquist-volume");
+      if (savedVolume !== null) volume = Math.min(1, Math.max(0, Number(savedVolume)));
+    } catch {
+      /* Best-effort only. */
+    }
 
     // Tauri delivers file drops through the webview, not through HTML5 drag events.
     // Guarded so the page still mounts under a plain `vite dev` browser session, where
@@ -109,6 +128,20 @@
     currentTime = seconds;
   }
 
+  function toggleMute() {
+    muted = !muted;
+  }
+
+  function setVolume(v: number) {
+    volume = Math.min(1, Math.max(0, v));
+    if (volume > 0) muted = false;
+    try {
+      localStorage.setItem("nyquist-volume", String(volume));
+    } catch {
+      /* Best-effort only. */
+    }
+  }
+
   async function handleExport() {
     if (!result) return;
     const path = await save({
@@ -119,44 +152,42 @@
     await exportReport(path, JSON.stringify(result, null, 2));
   }
 
-  const fmt = (v: number, d = 1) => v.toFixed(d);
+  const fmt = (v: number, d = 1) => fmtNumber(v, d);
   const fmtDuration = (s: number) => `${Math.floor(s / 60)}:${Math.round(s % 60).toString().padStart(2, "0")}`;
-  const fmtHz = (hz: number) => (hz >= 1000 ? `${(hz / 1000).toFixed(1)} kHz` : `${hz.toFixed(0)} Hz`);
+  const fmtHz = (hz: number) => (hz >= 1000 ? `${fmtNumber(hz / 1000, 1)} kHz` : `${fmtNumber(hz, 0)} Hz`);
   const fmtCount = (n: number) =>
-    n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1_000 ? `${(n / 1_000).toFixed(1)}K` : `${n}`;
+    n >= 1_000_000 ? `${fmtNumber(n / 1_000_000, 1)}M` : n >= 1_000 ? `${fmtNumber(n / 1_000, 1)}K` : `${n}`;
 
   type Tone = "good" | "warn" | "bad" | "neutral";
 
   /** DR bands follow the Pleasurize Music Foundation / DR-database convention the
    * audiophile community actually publishes against. A convention, not a standard. */
   const drTone = (dr: number): Tone => (dr >= 12 ? "good" : dr >= 8 ? "warn" : "bad");
-  const drLabel = (dr: number) =>
-    dr >= 14 ? "wide" : dr >= 12 ? "good" : dr >= 8 ? "moderate" : "heavily compressed";
 
   /** EBU R128 and every major streaming platform ask for -1 dBTP of headroom; above 0 the
    * file will clip on any resampling or lossy re-encode downstream. */
   const truePeakTone = (dbtp: number): Tone => (dbtp > 0 ? "bad" : dbtp > -1 ? "warn" : "good");
 
-  const verdictMeta: Record<Verdict, { label: string; icon: IconName; tone: string; blurb: string }> = {
+  const verdictMeta = $derived<Record<Verdict, { label: string; icon: IconName; tone: string; blurb: string }>>({
     probably_authentic: {
-      label: "Probably authentic",
+      label: T.verdict.probablyAuthentic.label,
       icon: "checkCircle",
       tone: "authentic",
-      blurb: "No encoder fingerprint found in the spectrum."
+      blurb: T.verdict.probablyAuthentic.blurb
     },
     probably_transcoded: {
-      label: "Probably transcoded",
+      label: T.verdict.probablyTranscoded.label,
       icon: "alertCircle",
       tone: "transcoded",
-      blurb: "This looks like lossy audio wrapped in a lossless container."
+      blurb: T.verdict.probablyTranscoded.blurb
     },
     indeterminate: {
-      label: "Inconclusive",
+      label: T.verdict.indeterminate.label,
       icon: "helpCircle",
       tone: "indeterminate",
-      blurb: "Not enough evidence either way. That is a real answer, not a failure."
+      blurb: T.verdict.indeterminate.blurb
     }
-  };
+  });
 
   type Finding = { icon: IconName; tone: "warn" | "bad"; title: string; detail: string };
 
@@ -171,44 +202,43 @@
       f.push({
         icon: "shield",
         tone: "bad",
-        title: "Checksum mismatch",
-        detail:
-          "The audio does not match the checksum stored inside the file. It has been truncated, edited, or corrupted since it was created."
+        title: T.findings.checksumMismatchTitle,
+        detail: T.findings.checksumMismatchDetail
       });
     }
     if (fi.decode_errors > 0) {
       f.push({
         icon: "alertTriangle",
         tone: "bad",
-        title: `${fi.decode_errors} damaged packet${fi.decode_errors > 1 ? "s" : ""} skipped`,
-        detail:
-          "Part of the file could not be decoded. Every measurement below describes the audio that survived, not the whole track."
+        title: T.findings.damagedPacketsTitle(fi.decode_errors),
+        detail: T.findings.damagedPacketsDetail
       });
     }
     if (bd.declared_bit_depth !== null && bd.effective_bit_depth !== null && bd.effective_bit_depth < bd.declared_bit_depth) {
       f.push({
         icon: "layers",
         tone: "warn",
-        title: `${bd.declared_bit_depth}-bit container holding ${bd.effective_bit_depth}-bit audio`,
-        detail: `Every sample lands exactly on the ${bd.effective_bit_depth}-bit quantization grid, so the extra depth carries no information. The file was padded, not remastered.`
+        title: T.findings.bitDepthPaddingTitle(bd.declared_bit_depth, bd.effective_bit_depth),
+        detail: T.findings.bitDepthPaddingDetail(bd.effective_bit_depth)
       });
     }
     if (sr.likely_upsampled) {
       f.push({
         icon: "ruler",
         tone: "warn",
-        title: `${(sr.declared_sample_rate_hz / 1000).toFixed(1)} kHz declared, ${(sr.content_bandwidth_hz / 1000).toFixed(1)} kHz used`,
-        detail: `Content stops at ${(sr.bandwidth_ratio * 100).toFixed(0)}% of the bandwidth this sample rate exists to carry${
-          sr.sufficient_sample_rate_hz ? `. A ${(sr.sufficient_sample_rate_hz / 1000).toFixed(1)} kHz file would hold all of it losslessly` : ""
-        }. The audio is intact — the sample rate on the label is inflated.`
+        title: T.findings.upsampledTitle(fmt(sr.declared_sample_rate_hz / 1000, 1), fmt(sr.content_bandwidth_hz / 1000, 1)),
+        detail: T.findings.upsampledDetail(
+          fmt(sr.bandwidth_ratio * 100, 0),
+          sr.sufficient_sample_rate_hz ? fmt(sr.sufficient_sample_rate_hz / 1000, 1) : null
+        )
       });
     }
     if (sa.clipping_count_total > 0) {
       f.push({
         icon: "clip",
         tone: sa.clipping_count_total > 1000 ? "bad" : "warn",
-        title: `${fmtCount(sa.clipping_count_total)} clipped samples`,
-        detail: "Samples pinned at full scale, where the waveform was flattened rather than reproduced."
+        title: T.findings.clippedSamplesTitle(fmtCount(sa.clipping_count_total)),
+        detail: T.findings.clippedSamplesDetail
       });
     }
     return f;
@@ -217,25 +247,31 @@
 
 <svelte:head><title>Nyquist</title></svelte:head>
 
-<div class="shell" class:dragging>
+<div class="shell" class:dragging data-drop-label={T.dragOverlay}>
   <header class="topbar">
     <!-- Wordmark only. The orb was tried here, held still, and dropped: at 30px its dots
          collapse into a smudge that reads as neither the orb nor a logo. The name set in
          spaced monospace carries the instrument feel on its own. -->
     <div class="brand">
       <h1>Nyquist</h1>
-      <p class="tagline">Is this file what it says it is?</p>
+      <p class="tagline">{T.brand.tagline}</p>
     </div>
     <div class="topbar-actions">
       {#if result}
         <button class="ghost" onclick={pickAndAnalyze} disabled={loading}>
-          <Icon name="upload" size={14} /> Open another
+          <Icon name="upload" size={14} /> {T.actions.openAnother}
         </button>
         <button class="ghost" onclick={handleExport}>
-          <Icon name="download" size={14} /> Export JSON
+          <Icon name="download" size={14} /> {T.actions.exportJson}
         </button>
       {/if}
-      <button class="ghost icon-only" onclick={toggleTheme} aria-label="Switch theme">
+      <!-- Discreet by design: two-letter code naming the *other* language, matching the
+           same small mono ghost-button chrome as the theme toggle rather than a flag or a
+           globe icon that would imply a menu of more than one alternative. -->
+      <button class="ghost icon-only lang-toggle" onclick={toggleLang} aria-label={T.actions.switchLang}>
+        {langState.current === "fr" ? "EN" : "FR"}
+      </button>
+      <button class="ghost icon-only" onclick={toggleTheme} aria-label={T.actions.switchTheme}>
         <Icon name={theme === "dark" ? "sun" : "moon"} size={15} />
       </button>
     </div>
@@ -245,9 +281,9 @@
     {#if !result && !loading}
       <section class="dropzone">
         <Icon name="upload" size={26} />
-        <h2>Drop an audio file here</h2>
-        <p>FLAC, ALAC, WAV, MP3, AAC or OGG. Nothing leaves your machine.</p>
-        <button class="primary" onclick={pickAndAnalyze}>Choose a file</button>
+        <h2>{T.dropzone.title}</h2>
+        <p>{T.dropzone.subtitle}</p>
+        <button class="primary" onclick={pickAndAnalyze}>{T.dropzone.chooseFile}</button>
         {#if error}
           <p class="error" role="alert">{error}</p>
         {/if}
@@ -257,8 +293,8 @@
     {#if loading}
       <section class="loading" aria-live="polite">
         <ThinkingOrb state="composing" size={64} dark={theme === "dark"} />
-        <p>Decoding and analyzing…</p>
-        <span class="hint">Full-length FFT and loudness passes over every sample.</span>
+        <p>{T.loading.text}</p>
+        <span class="hint">{T.loading.hint}</span>
       </section>
     {/if}
 
@@ -285,8 +321,8 @@
             <p>{vm.blurb}</p>
           </div>
           <div class="confidence">
-            <span class="confidence-value">{(ta.confidence_score * 100).toFixed(0)}<i>%</i></span>
-            <span class="confidence-label">confidence</span>
+            <span class="confidence-value">{fmt(ta.confidence_score * 100, 0)}<i>%</i></span>
+            <span class="confidence-label">{T.verdict.confidence}</span>
           </div>
         </div>
         <ul class="evidence">
@@ -317,7 +353,7 @@
             <span class="chip">{fi.codec.toUpperCase()}</span>
             <span class="chip">{fmtHz(fi.sample_rate_hz)}</span>
             {#if fi.bit_depth}<span class="chip">{fi.bit_depth}-bit</span>{/if}
-            <span class="chip">{fi.channels === 2 ? "stereo" : `${fi.channels}ch`}</span>
+            <span class="chip">{fi.channels === 2 ? T.file2.stereo : `${fi.channels}ch`}</span>
             <span class="chip">{fmtDuration(fi.duration_seconds)}</span>
           </span>
         </div>
@@ -326,10 +362,10 @@
              obvious at a glance, and the reason sample_rate_analysis exists. -->
         <div class="bandwidth">
           <div class="bandwidth-head">
-            <span class="label">Bandwidth used</span>
+            <span class="label">{T.file.bandwidthUsed}</span>
             <span class="value" class:value-warn={sr.likely_upsampled}>
-              {fmtHz(sr.content_bandwidth_hz)} of {fmtHz(fi.nyquist_hz)}
-              <em>({(sr.bandwidth_ratio * 100).toFixed(0)}%)</em>
+              {T.file.bandwidthPhrase(fmtHz(sr.content_bandwidth_hz), fmtHz(fi.nyquist_hz))}
+              <em>({fmt(sr.bandwidth_ratio * 100, 0)}%)</em>
             </span>
           </div>
           <Meter value={sr.bandwidth_ratio} min={0} max={1} tone={sr.likely_upsampled ? "warn" : "good"} />
@@ -337,7 +373,7 @@
       </section>
 
       <section class="card">
-        <h2 class="section-title">Spectrum</h2>
+        <h2 class="section-title">{T.spectrum.title}</h2>
         <Spectrogram
           data={spa.spectrogram}
           spectralCutoffHz={spa.spectral_cutoff_hz}
@@ -347,95 +383,95 @@
         />
         <div class="spectral-stats">
           <div class="stat-block">
-            <span class="label">Bandwidth</span>
+            <span class="label">{T.spectrum.bandwidth}</span>
             <span class="value">{fmtHz(spa.spectral_cutoff_hz)}</span>
           </div>
           <div class="stat-block">
-            <span class="label">Rolloff steepness</span>
+            <span class="label">{T.spectrum.rolloffSteepness}</span>
             <span class="value">
               {spa.encoder_edge_hz !== null
-                ? `${fmt(spa.rolloff_steepness_db_per_khz, 0)} dB/kHz @ ${fmtHz(spa.encoder_edge_hz)}`
-                : "no edge found"}
+                ? T.spectrum.steepnessValue(fmt(spa.rolloff_steepness_db_per_khz, 0), fmtHz(spa.encoder_edge_hz))
+                : T.spectrum.noEdgeFound}
             </span>
           </div>
         </div>
-        <p class="note">
-          Bandwidth is where content stops — the lowpass edge if there is one, otherwise
-          Nyquist. Steepness is what separates an encoder from a dark mix: a codec's lowpass
-          falls off a cliff, a mastering choice slopes away. Click the spectrogram to jump
-          playback there.
-        </p>
+        <p class="note">{T.spectrum.note}</p>
       </section>
 
       <div class="metric-columns">
         <section class="card">
-          <h2 class="section-title">Loudness</h2>
+          <h2 class="section-title">{T.loudness.title}</h2>
 
           <div class="metric">
             <div class="metric-head">
-              <span class="label">Integrated loudness</span>
-              <span class="value">{sa.lufs_integrated !== null ? `${fmt(sa.lufs_integrated)} LUFS` : "n/a"}</span>
+              <span class="label">{T.loudness.integratedLoudness}</span>
+              <span class="value">{sa.lufs_integrated !== null ? `${fmt(sa.lufs_integrated)} LUFS` : T.loudness.na}</span>
             </div>
             {#if sa.lufs_integrated !== null}
-              <Meter value={sa.lufs_integrated} min={-30} max={0} reference={-14} referenceLabel="-14 LUFS streaming target" />
-              <span class="scale-note">tick marks the -14 LUFS streaming target</span>
+              <Meter value={sa.lufs_integrated} min={-30} max={0} reference={-14} referenceLabel={T.loudness.lufsTargetNote} />
+              <span class="scale-note">{T.loudness.lufsTargetNote}</span>
             {/if}
           </div>
 
           <div class="metric">
             <div class="metric-head">
-              <span class="label">True peak</span>
+              <span class="label">{T.loudness.truePeak}</span>
               <span class="value {truePeakTone(sa.true_peak_dbtp)}">{fmt(sa.true_peak_dbtp)} dBTP</span>
             </div>
             <Meter value={sa.true_peak_dbtp} min={-12} max={3} tone={truePeakTone(sa.true_peak_dbtp)} reference={-1} referenceLabel="-1 dBTP" />
             <span class="scale-note">
-              {sa.true_peak_dbtp > 0
-                ? "above full scale — will clip when resampled or re-encoded"
-                : "tick marks the -1 dBTP headroom EBU R128 asks for"}
+              {sa.true_peak_dbtp > 0 ? T.loudness.clipWarnNote : T.loudness.headroomNote}
             </span>
           </div>
 
           <div class="metric">
             <div class="metric-head">
-              <span class="label">Loudness range</span>
-              <span class="value">{sa.loudness_range_lu !== null ? `${fmt(sa.loudness_range_lu)} LU` : "n/a"}</span>
+              <span class="label">{T.loudness.loudnessRange}</span>
+              <span class="value">{sa.loudness_range_lu !== null ? `${fmt(sa.loudness_range_lu)} LU` : T.loudness.na}</span>
             </div>
           </div>
 
           <div class="metric">
             <div class="metric-head">
-              <span class="label">Peak / RMS</span>
+              <span class="label">{T.loudness.peakRms}</span>
               <span class="value">{fmt(sa.peak_dbfs)} / {fmt(sa.rms_dbfs)} dBFS</span>
             </div>
           </div>
         </section>
 
         <section class="card">
-          <h2 class="section-title">Dynamics</h2>
+          <h2 class="section-title">{T.dynamics.title}</h2>
 
           <div class="metric">
             <div class="metric-head">
-              <span class="label">Dynamic range</span>
+              <span class="label">{T.dynamics.dynamicRange}</span>
               <span class="value {dr.dr14 !== null ? drTone(dr.dr14) : ''}">
-                {dr.dr14 !== null ? `DR${dr.dr14}` : "n/a"}
+                {dr.dr14 !== null ? `DR${dr.dr14}` : T.loudness.na}
               </span>
             </div>
             {#if dr.dr14 !== null}
               <Meter value={dr.dr14} min={0} max={20} tone={drTone(dr.dr14)} />
-              <span class="scale-note">{drLabel(dr.dr14)} — Pleasurize DR scale, the one the loudness-war database uses</span>
+              <span class="scale-note">{T.dynamics.drNote(T.dynamics.drLabel(dr.dr14))}</span>
             {/if}
           </div>
 
           <div class="metric">
             <div class="metric-head">
-              <span class="label">Clipped samples</span>
+              <span class="label">{T.dynamics.clippedSamples}</span>
               <span class="value {sa.clipping_count_total > 0 ? 'warn' : ''}">{fmtCount(sa.clipping_count_total)}</span>
             </div>
           </div>
 
           <table class="channels">
             <thead>
-              <tr><th>Ch</th><th>Peak</th><th>RMS</th><th>Crest</th><th>DR</th><th>Clipped</th></tr>
+              <tr>
+                <th>{T.dynamics.table.ch}</th>
+                <th>{T.dynamics.table.peak}</th>
+                <th>{T.dynamics.table.rms}</th>
+                <th>{T.dynamics.table.crest}</th>
+                <th>{T.dynamics.table.dr}</th>
+                <th>{T.dynamics.table.clipped}</th>
+              </tr>
             </thead>
             <tbody>
               {#each sa.per_channel as ch (ch.channel)}
@@ -450,53 +486,45 @@
               {/each}
             </tbody>
           </table>
-          <p class="note">
-            Crest factor is a plain peak-to-RMS ratio. DR is the block-based Pleasurize
-            algorithm. They measure different things and are not meant to match.
-          </p>
+          <p class="note">{T.dynamics.channelsNote}</p>
         </section>
       </div>
 
       <section class="card">
-        <h2 class="section-title">File</h2>
+        <h2 class="section-title">{T.file2.title}</h2>
         <dl class="facts">
-          <div><dt>Container</dt><dd>{fi.container}</dd></div>
-          <div><dt>Codec</dt><dd>{fi.codec}</dd></div>
-          <div><dt>Sample rate</dt><dd>{fmtHz(fi.sample_rate_hz)}</dd></div>
-          <div><dt>Nyquist</dt><dd>{fmtHz(fi.nyquist_hz)}</dd></div>
-          <div><dt>Bit depth</dt><dd>{fi.bit_depth ? `${fi.bit_depth}-bit` : "—"}</dd></div>
-          <div><dt>Channels</dt><dd>{fi.channels}</dd></div>
-          <div><dt>Duration</dt><dd>{fmtDuration(fi.duration_seconds)}</dd></div>
-          <div><dt>Size</dt><dd>{(fi.file_size_bytes / 1_000_000).toFixed(1)} MB</dd></div>
-          <div><dt>Avg. bitrate</dt><dd>{fi.bitrate_kbps ? `${fmt(fi.bitrate_kbps, 0)} kbps` : "—"}</dd></div>
-          <div><dt>Samples</dt><dd>{fmtCount(fi.sample_count)}</dd></div>
+          <div><dt>{T.file2.container}</dt><dd>{fi.container}</dd></div>
+          <div><dt>{T.file2.codec}</dt><dd>{fi.codec}</dd></div>
+          <div><dt>{T.file2.sampleRate}</dt><dd>{fmtHz(fi.sample_rate_hz)}</dd></div>
+          <div><dt>{T.file2.nyquist}</dt><dd>{fmtHz(fi.nyquist_hz)}</dd></div>
+          <div><dt>{T.file2.bitDepth}</dt><dd>{fi.bit_depth ? `${fi.bit_depth}-bit` : "—"}</dd></div>
+          <div><dt>{T.file2.channels}</dt><dd>{fi.channels}</dd></div>
+          <div><dt>{T.file2.duration}</dt><dd>{fmtDuration(fi.duration_seconds)}</dd></div>
+          <div><dt>{T.file2.size}</dt><dd>{fmt(fi.file_size_bytes / 1_000_000, 1)} MB</dd></div>
+          <div><dt>{T.file2.avgBitrate}</dt><dd>{fi.bitrate_kbps ? `${fmt(fi.bitrate_kbps, 0)} kbps` : "—"}</dd></div>
+          <div><dt>{T.file2.samples}</dt><dd>{fmtCount(fi.sample_count)}</dd></div>
           <div>
-            <dt>Integrity</dt>
+            <dt>{T.file2.integrity}</dt>
             <dd class:bad={fi.integrity_verified === false} class:good={fi.integrity_verified === true}>
               {fi.integrity_verified === true
-                ? "Checksum verified"
+                ? T.file2.integrityVerified
                 : fi.integrity_verified === false
-                  ? "Checksum mismatch"
+                  ? T.file2.integrityMismatch
                   : fi.codec === "flac"
-                    ? "No checksum stored"
-                    : "Not available for this codec"}
+                    ? T.file2.integrityNoChecksum
+                    : T.file2.integrityUnavailable}
             </dd>
           </div>
         </dl>
       </section>
 
-      <p class="disclaimer">
-        Nyquist reports what it can measure and says so when that is not enough. The transcode
-        verdict rests mainly on the shape of the spectral rolloff, which cannot see a
-        transparent encode such as LAME V0 or AAC 256 — a clean result is not proof of
-        provenance.
-      </p>
+      <p class="disclaimer">{T.disclaimer}</p>
     {/if}
   </main>
 
   {#if result && audioSrc}
     <div class="player">
-      <button class="play" onclick={togglePlay} aria-label={isPlaying ? "Pause" : "Play"}>
+      <button class="play" onclick={togglePlay} aria-label={isPlaying ? T.player.pause : T.player.play}>
         <Icon name={isPlaying ? "pause" : "play"} size={15} />
       </button>
       <span class="time">{fmtDuration(currentTime)}</span>
@@ -507,7 +535,7 @@
         max={result.file_info.duration_seconds}
         step="0.1"
         value={currentTime}
-        aria-label="Playback position"
+        aria-label={T.player.playbackPosition}
         oninput={(e) => {
           scrubbing = true;
           seekTo(Number(e.currentTarget.value));
@@ -515,6 +543,19 @@
         onchange={() => (scrubbing = false)}
       />
       <span class="time muted-time">{fmtDuration(result.file_info.duration_seconds)}</span>
+      <button class="mute" onclick={toggleMute} aria-label={muted || volume === 0 ? T.player.unmute : T.player.mute}>
+        <Icon name={muted || volume === 0 ? "volumeMute" : "speaker"} size={15} />
+      </button>
+      <input
+        class="volume"
+        type="range"
+        min="0"
+        max="1"
+        step="0.01"
+        value={muted ? 0 : volume}
+        aria-label={T.player.volume}
+        oninput={(e) => setVolume(Number(e.currentTarget.value))}
+      />
     </div>
   {/if}
 
@@ -522,6 +563,8 @@
     <audio
       bind:this={audioEl}
       src={audioSrc}
+      bind:volume
+      bind:muted
       ontimeupdate={(e) => {
         if (!scrubbing) currentTime = e.currentTarget.currentTime;
       }}
@@ -602,7 +645,11 @@
   }
 
   .shell.dragging::after {
-    content: "Drop to analyze";
+    /* Read from the `data-drop-label` attribute (set from `T.dragOverlay` in the markup)
+       rather than a literal string, so this CSS-only overlay — kept off the JS/reactive
+       path on purpose, see the comment on `.shell` above — still follows the language
+       toggle. */
+    content: attr(data-drop-label);
     position: fixed;
     inset: 0;
     z-index: 20;
@@ -1254,6 +1301,42 @@
     color: var(--ink-low);
   }
 
+  /* ── volume ── */
+
+  .mute {
+    display: grid;
+    place-items: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    flex-shrink: 0;
+    border: none;
+    background: transparent;
+    color: var(--ink-mid);
+    transition: color 0.18s ease;
+  }
+
+  .mute:hover {
+    color: var(--ink-hi);
+  }
+
+  .volume {
+    flex-shrink: 0;
+    width: 64px;
+    appearance: none;
+    height: 3px;
+    border-radius: 2px;
+    background: var(--ink-faint);
+  }
+
+  .volume::-webkit-slider-thumb {
+    appearance: none;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--ink-hi);
+    cursor: pointer;
+  }
+
   @media (max-width: 720px) {
     .metric-columns {
       grid-template-columns: 1fr;
@@ -1267,6 +1350,11 @@
     }
     .spectral-stats {
       gap: 1.8rem;
+    }
+    /* The player is already tight against a narrow scrubber; the volume slider is the
+       first thing to go, not the mute button that still communicates state. */
+    .volume {
+      display: none;
     }
   }
 </style>
