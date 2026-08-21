@@ -10,7 +10,7 @@
 # Splitting it out also keeps the CLI out of the shipped `.app`, which has no use for it.
 [package]
 name = "nyquist-cli"
-version = "0.2.0"
+version = "0.3.0"
 description = "Headless companion to the Nyquist desktop app"
 authors = ["Nyquist contributors"]
 license = "MIT"
