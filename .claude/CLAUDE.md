@@ -29,13 +29,23 @@ cartes, icônes, canvas spectrogramme + dégradé inferno) — validée visuelle
 fonctionnellement en conditions réelles par l'utilisateur.
 
 **Le scoring V0.3 (transcodage lossy) reste délibérément conservateur** — signal principal :
-pente de rolloff (voir `transcode_detect.rs`), corpus minuscule (7 fixtures synthétiques +
-2 fixtures bit-depth), confiance plafonnée (≤0.9 avec empreinte de tag corroborante, ≤0.8
-spectral seul, ≤0.6 authentique). Cross-validé contre des mesures ffmpeg indépendantes et,
-ponctuellement hors corpus versionné, contre de vrais FLACs commerciaux retranscodés (a
-révélé que la *position* seule du cutoff est trompeuse sur de la musique réelle — voir
-`.claude/CONTEXT.md`). Rapport FP/FN sur le corpus (`tests/corpus_smoke.rs`) : 0 faux
-positif, 0 faux négatif inattendu, 2 échecs documentés/attendus (LAME V0, AAC 256).
+pente de rolloff (voir `transcode_detect.rs`), confiance plafonnée (≤0.9 avec empreinte de
+tag corroborante, ≤0.8 spectral seul, ≤0.6 authentique). Cross-validé contre des mesures
+ffmpeg indépendantes et, ponctuellement hors corpus versionné, contre de vrais FLACs
+commerciaux retranscodés (a révélé que la *position* seule du cutoff est trompeuse sur de la
+musique réelle — voir `.claude/CONTEXT.md`). Rapport FP/FN sur le corpus
+(`tests/corpus_smoke.rs`) : **20 fixtures, 0 faux positif, 0 faux négatif inattendu, 5
+échecs documentés**.
+
+⚠️ **Le point aveugle n'est pas un simple raté : c'est une affirmation fausse.** LAME V0 et
+AAC 256 ne coupent pas, donc ils sortent en « probablement authentique » à 60 % — l'outil
+cautionne le faux au lieu de dire « je ne sais pas ». L'AAC 128 s'échappe aussi sur du
+matériau non-stationnaire (27 dB/kHz, sous le seuil de 40) alors qu'il est attrapé sans
+peine sur du bruit plat : ce qui décide, c'est le matériau, pas le débit. Quatre pistes ont
+été prototypées pour combler ça (trous spectraux, grille de trames, stabilité de coupure,
+stéréo joint) — **aucune ne sépare un encodage transparent d'un lossless**, et l'une accuse
+un piano « in the box » plus fort qu'un vrai transcodage. Mesures consignées dans
+`tests/fixtures/corpus/README.md` : les relire avant de retenter.
 
 **Le bit-depth padding ("faux hi-res") est un problème séparé, avec sa propre méthode** —
 alignement exact sur une grille de quantification plus grossière que la profondeur déclarée
@@ -76,6 +86,7 @@ nyquist/
 │   │   ├── dynamic_range.rs    # ✅ DR14 (Pleasurize Music Foundation), voir module docs
 │   │   ├── bit_depth.rs        # ✅ Détection bit-depth padding ("faux hi-res")
 │   │   ├── spectral.rs         # ✅ FFT, spectrogramme downsamplé, cutoff + pente + dans le temps
+│   │   ├── stereo.rs           # ✅ Corrélation L/R, side/mid global et par bande, dual-mono
 │   │   ├── transcode_detect.rs # ✅ Scoring 3 états, voir la skill dédiée + module docs
 │   │   └── commands.rs         # ✅ analyze_file, authorize_playback, export_report
 │   ├── tests/
@@ -134,7 +145,8 @@ voir la skill `tauri-ipc-contract`) + `transcode_assessment` (verdict 3 états +
 (`message`, ce que voient le CLI et le JSON exporté) **et** son `code` + ses mesures brutes,
 pour que l'UI recompose la phrase en français — ajouter une variante à `IndicatorDetail`
 oblige à traduire dans `i18n.svelte.ts`, sinon `npm run check` échoue) +
-`encoder_tag_matches` + `bit_depth_analysis`.
+`encoder_tag_matches` + `bit_depth_analysis` + `stereo_analysis` (corrélation L/R, side/mid
+par bande, dual-mono exact — `null` si le fichier n'est pas exactement stéréo).
 Payload mesuré ~240KB pour un FLAC de 6:52, calcul total ~2.4s en release (voir CONTEXT.md).
 Deux autres commandes IPC : `authorize_playback(path)` (juste avant `convertFileSrc(path)`
 côté frontend pour la lecture) et `export_report(path, json)` (le frontend sérialise et

@@ -58,6 +58,59 @@ scoring needs indicators beyond raw cutoff frequency (e.g. quantization noise fl
 any chance on these two; a detector that only checks `cutoff_hz` should score them
 "indéterminé," never a confident "authentic."
 
+> **The current detector does not meet that bar, and the fixtures below prove it.** These
+> four files come out `ProbablyAuthentic` at 60% — the tool vouching for a transcode, not
+> merely failing to catch one. Four independent approaches were prototyped against this
+> corpus to close the gap; the section at the end of this file records what each measured
+> and why none of them shipped.
+
+## Non-stationary, true-stereo material
+
+Everything above is **stationary noise in dual-mono**, and both of those limit what the
+corpus can validate:
+
+- `-ac 2` upmixes a mono source, so L and R come out bit-identical — `side = L-R` is digital
+  silence. Anything that reads the stereo image is untestable on those files. (`stereo.rs`
+  reports this: `authentic_44k_noise.flac` correctly flags `dual_mono`.)
+- Stationary noise is the most favourable material a perceptual encoder ever sees. Codecs
+  betray themselves on *change*, and 5 seconds of steady noise exercises none of it.
+
+These share one source built from two independently seeded pink-noise channels, with quiet
+passages every 2s, transients every 0.5s, and sustained tones — the closest this corpus gets
+to real music. Measured with the current detector:
+
+| File | Encoder | Measured | Verdict today |
+|---|---|---|---|
+| `authentic_dynamic_stereo_44k.flac` | none — lossless | no edge | `ProbablyAuthentic` 60% ✅ |
+| `transcoded_dynamic_mp3_128_44k.flac` | LAME MP3 128k | 16.8kHz @ 72 dB/kHz | `ProbablyTranscoded` 72% ✅ |
+| `transcoded_dynamic_mp3_v0_44k.flac` | LAME MP3 V0 | no edge | `ProbablyAuthentic` 60% ❌ |
+| `transcoded_dynamic_aac_256_44k.flac` | AAC 256k (Apple) | no edge | `ProbablyAuthentic` 60% ❌ |
+| `transcoded_dynamic_aac_128_44k.flac` | AAC 128k (Apple) | 18.3kHz @ 27 dB/kHz | `Indeterminate` 30% ❌ |
+
+The AAC 128 row is the one the stationary corpus could not have shown: on flat noise the
+same encoder measures ~106 dB/kHz and is caught comfortably, but on this material its
+transition is gradual enough to fall under the 40 dB/kHz gate. **The gap is a property of
+the material, not of the bitrate.**
+
+## False-positive traps on non-stationary material
+
+| File | What it is |
+|---|---|
+| `authentic_decay_to_silence_44k.flac` | Lossless tonal content produced "in the box": partials at decreasing amplitudes (1/h, like a real instrument) decaying toward digital silence between notes. The quiet partials cross the 16-bit floor well before the loud ones, so the high band empties while the mids still ring — the same shape a codec produces when it zeroes high bands, with no encoder anywhere. Real-world equivalents: solo piano VST, sparse electronic music, anything mixed without a noise floor. |
+| `authentic_bass_only_44k.flac` | Loud low-frequency content with essentially no treble: the high band sits at the floor while the file as a whole is loud. Guards any rule of the form "high band is empty while the signal is strong, therefore lossy". |
+
+## What was tried against the blind spot, and why nothing shipped
+
+Prototyped against this corpus plus a larger throwaway set. Recorded here so the next
+attempt starts from the results rather than from the same four ideas:
+
+| Approach | Result |
+|---|---|
+| **Spectral holes** — high bands zeroed during quiet passages | Catches LAME V0 with a wide margin (31.6% of frames vs 0.0% for lossless). **But** an in-the-box piano decaying to digital silence scores 22.5-23.3%, *above* a real LAME V2 transcode. Tightening the loudness gate zeroes every codec (0.00) while the piano stays at 22.55 — the codec's holes live only in quiet passages, exactly where the piano's do. No threshold keeps one without the other. |
+| **Codec frame grid** — periodicity at 1152 (MP3) / 1024 (AAC) samples in the HF envelope | No signal: all fixtures score under 3 σ above background. MDCT's 50%-overlapped TDAC windowing cross-fades quantization noise across frame boundaries, so there is no abrupt periodicity to find. |
+| **Cutoff stability over time** — "a codec's lowpass is a fixed filter" | Comes out **backwards**. A mastering lowpass is also a fixed filter: the authentic naturally-dark fixtures measure 0 Hz of drift while real LAME/AAC transcodes wander 33-252 Hz. Reported by `spectral.rs` as information; must never be scored. |
+| **Joint-stereo / intensity-stereo collapse** — side channel vanishing in the high bands | No separation. High-band side/mid sits within a decibel of the lossless source for V0 and AAC 256 alike (14.5-15.3 dB across the set). Measured and reported by `stereo.rs`, not scored. |
+
 ## Silence padding (false-negative trap)
 
 | File | What it is |

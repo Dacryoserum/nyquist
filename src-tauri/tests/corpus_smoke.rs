@@ -193,6 +193,94 @@ const FIXTURES: &[Fixture] = &[
         is_actually_transcoded: true,
         known_undetectable: false,
     },
+    // ── Non-stationary, true-stereo material ────────────────────────────────────────
+    // Everything above is stationary noise in dual-mono. These five share one source with
+    // decorrelated channels, quiet passages, transients and sustained tones — the closest
+    // this corpus gets to the material the tool is actually pointed at. They are also what
+    // makes the size of the blind spot visible: on flat noise it costs two fixtures, here
+    // it costs three, one of which (AAC 128) is caught on stationary material and escapes
+    // on this one.
+    Fixture {
+        filename: "authentic_dynamic_stereo_44k.flac",
+        expected_sample_rate: 44_100,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_duration_seconds: 10.0,
+        is_actually_transcoded: false,
+        known_undetectable: false,
+    },
+    Fixture {
+        // Still caught, and the control that proves the new material did not simply break
+        // detection across the board: 72 dB/kHz at 16.8 kHz.
+        filename: "transcoded_dynamic_mp3_128_44k.flac",
+        expected_sample_rate: 44_100,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (15_500.0, 18_000.0),
+        expected_duration_seconds: 10.0,
+        is_actually_transcoded: true,
+        known_undetectable: false,
+    },
+    Fixture {
+        // The documented blind spot, reproduced on realistic material: no lowpass at all,
+        // so this reads "probably authentic" at 60% — the tool actively vouching for a
+        // transcode rather than merely failing to catch it.
+        filename: "transcoded_dynamic_mp3_v0_44k.flac",
+        expected_sample_rate: 44_100,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_duration_seconds: 10.0,
+        is_actually_transcoded: true,
+        known_undetectable: true,
+    },
+    Fixture {
+        // Same, for Apple's AAC at 256 kbps.
+        filename: "transcoded_dynamic_aac_256_44k.flac",
+        expected_sample_rate: 44_100,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_duration_seconds: 10.0,
+        is_actually_transcoded: true,
+        known_undetectable: true,
+    },
+    Fixture {
+        // New information from this material: AAC 128 lowpasses at 18.3 kHz but only at
+        // 27 dB/kHz, under the 40 dB/kHz gate, so it lands on "indeterminate" instead of
+        // being caught. On stationary noise the same encoder reads ~106 dB/kHz and is
+        // caught comfortably — the gap is a property of the *material*, not the bitrate,
+        // which is exactly what a stationary-only corpus cannot show.
+        filename: "transcoded_dynamic_aac_128_44k.flac",
+        expected_sample_rate: 44_100,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (18_000.0, 19_500.0),
+        expected_duration_seconds: 10.0,
+        is_actually_transcoded: true,
+        known_undetectable: true,
+    },
+    // ── False-positive traps on non-stationary material ─────────────────────────────
+    Fixture {
+        // Lossless tonal content decaying to digital silence between notes, with partials
+        // at decreasing amplitudes so the high band empties before the mids do. Reads as a
+        // codec zeroing high bands without any encoder involved; see corpus/README.md.
+        filename: "authentic_decay_to_silence_44k.flac",
+        expected_sample_rate: 44_100,
+        expected_channels: 2,
+        // Content genuinely stops where the top partial sits — no lowpass, so no edge.
+        expected_cutoff_range_hz: (10_000.0, 22_050.0),
+        expected_duration_seconds: 10.0,
+        is_actually_transcoded: false,
+        known_undetectable: false,
+    },
+    Fixture {
+        // Loud, and empty above the bass. Guards any rule of the form "high band is silent
+        // while the file is loud, therefore lossy".
+        filename: "authentic_bass_only_44k.flac",
+        expected_sample_rate: 44_100,
+        expected_channels: 2,
+        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_duration_seconds: 10.0,
+        is_actually_transcoded: false,
+        known_undetectable: false,
+    },
 ];
 
 fn corpus_dir() -> PathBuf {
@@ -309,10 +397,11 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
     assert!(false_negatives.is_empty(), "unexpected false negatives: {false_negatives:?}");
     assert_eq!(
         known_misses.len(),
-        2,
-        "expected exactly the 2 documented undetectable cases (V0, AAC256) to miss; got {known_misses:?} — \
-         if this is now 0, the blind spot may be fixed: update `known_undetectable` and this assertion; \
-         if this is >2, something else regressed"
+        5,
+        "expected exactly the 5 documented undetectable cases to miss (LAME V0 and AAC 256 on \
+         stationary noise, plus LAME V0, AAC 256 and AAC 128 on the non-stationary material); \
+         got {known_misses:?} — if this shrinks, the blind spot may be narrowing: update \
+         `known_undetectable` and this assertion; if it grows, something else regressed"
     );
 }
 
