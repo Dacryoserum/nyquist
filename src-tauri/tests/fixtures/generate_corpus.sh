@@ -162,6 +162,88 @@ ffmpeg -hide_banner -loglevel error -y \
   -af "adelay=3000|3000,apad=pad_dur=3" -sample_fmt s16 -c:a flac \
   "$CORPUS_DIR/transcoded_mp3_128_padded_silence.flac"
 
+echo "== Non-stationary, true-stereo material (the realistic case) =="
+
+# Everything above this line is stationary noise in dual-mono, and both of those are
+# measurement blind spots of their own:
+#
+#   - `-ac 2` upmixes a mono source, so L and R come out bit-identical (side = L-R is
+#     digital silence). Any detector that reads the stereo image — joint-stereo and
+#     intensity-stereo coding leave strong fingerprints — is untestable on those files,
+#     and so is any regression in one.
+#   - Stationary noise is the most favourable material a perceptual encoder ever sees.
+#     A codec betrays itself on *change*: it drops high bands during quiet passages and
+#     smears transients. None of that is exercised by 5 seconds of steady noise, which
+#     means the thresholds in spectral.rs were all tuned against material that does not
+#     resemble the music this tool is pointed at.
+#
+# The source below fixes both: two decorrelated pink-noise seeds (genuinely different L
+# and R), musical EQ, quiet passages alternating every 2s, percussive transients every
+# 0.5s, and sustained tonal content. Verified to regenerate bit-identically.
+DYN_SRC="$CORPUS_DIR/authentic_dynamic_stereo_44k.flac"
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "anoisesrc=color=pink:sample_rate=44100:duration=10:seed=11" \
+  -f lavfi -i "anoisesrc=color=pink:sample_rate=44100:duration=10:seed=77" \
+  -f lavfi -i "anoisesrc=color=white:sample_rate=44100:duration=10:seed=5" \
+  -f lavfi -i "sine=frequency=277:sample_rate=44100:duration=10" \
+  -f lavfi -i "sine=frequency=1109:sample_rate=44100:duration=10" \
+  -filter_complex "\
+    [0:a][1:a]join=inputs=2:channel_layout=stereo,bass=g=10:f=120,treble=g=-12:f=6000,\
+      volume=volume='if(lt(mod(t\,4)\,2)\,0.05\,1)':eval=frame[bed];\
+    [2:a]aeval='val(0)*exp(-mod(t\,0.5)*28)':c=same,pan=stereo|c0=c0|c1=0.9*c0,volume=2.2[tr];\
+    [3:a][4:a]amix=inputs=2:normalize=0,pan=stereo|c0=c0|c1=c0,volume=0.28[tone];\
+    [bed][tr][tone]amix=inputs=3:normalize=0,volume=0.7,alimiter=limit=0.89[out]" \
+  -map "[out]" -sample_fmt s16 -c:a flac "$DYN_SRC"
+
+# The same source through four encoders. Ground truth in corpus/README.md; what these
+# actually measure today is in that file's table, and two of them are the project's
+# documented blind spot reproduced on realistic material rather than on flat noise.
+transcode_dyn_mp3() {
+  ffmpeg -hide_banner -loglevel error -y -i "$DYN_SRC" -c:a libmp3lame $1 "$WORK_DIR/dyn.mp3"
+  ffmpeg -hide_banner -loglevel error -y -i "$WORK_DIR/dyn.mp3" -c:a flac "$CORPUS_DIR/$2.flac"
+}
+transcode_dyn_aac() {
+  ffmpeg -hide_banner -loglevel error -y -i "$DYN_SRC" -c:a aac_at $1 "$WORK_DIR/dyn.m4a"
+  ffmpeg -hide_banner -loglevel error -y -i "$WORK_DIR/dyn.m4a" -c:a flac "$CORPUS_DIR/$2.flac"
+}
+transcode_dyn_mp3 "-b:a 128k" "transcoded_dynamic_mp3_128_44k"
+transcode_dyn_mp3 "-q:a 0"    "transcoded_dynamic_mp3_v0_44k"
+transcode_dyn_aac "-b:a 256k" "transcoded_dynamic_aac_256_44k"
+transcode_dyn_aac "-b:a 128k" "transcoded_dynamic_aac_128_44k"
+
+echo "== False-positive traps on non-stationary material =="
+
+# Lossless tonal content produced "in the box": partials at decreasing amplitudes (1/h,
+# like a real instrument) decaying toward digital silence between notes. The quiet
+# partials cross the 16-bit floor well before the loud ones, so the high band empties out
+# while the mids are still ringing — the same phenomenology as a codec zeroing high bands,
+# with no encoder anywhere in the chain. Any future detector that reads high-band dropouts
+# has to clear this file first; the audit that motivated this fixture found a promising
+# spectral-hole detector that flagged exactly this shape harder than it flagged a real
+# LAME V0 transcode.
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "sine=frequency=220:sample_rate=44100:duration=10" \
+  -f lavfi -i "sine=frequency=880:sample_rate=44100:duration=10" \
+  -f lavfi -i "sine=frequency=3520:sample_rate=44100:duration=10" \
+  -f lavfi -i "sine=frequency=8800:sample_rate=44100:duration=10" \
+  -f lavfi -i "sine=frequency=15400:sample_rate=44100:duration=10" \
+  -f lavfi -i "sine=frequency=18700:sample_rate=44100:duration=10" \
+  -filter_complex "[0:a]volume=0dB[a];[1:a]volume=-12dB[b];[2:a]volume=-24dB[c];\
+    [3:a]volume=-34dB[d];[4:a]volume=-44dB[e];[5:a]volume=-52dB[f];\
+    [a][b][c][d][e][f]amix=inputs=6:normalize=0,\
+    aeval='val(0)*exp(-mod(t\,0.75)*11)':c=same,volume=17dB,pan=stereo|c0=c0|c1=0.97*c0" \
+  -sample_fmt s16 -c:a flac "$CORPUS_DIR/authentic_decay_to_silence_44k.flac"
+
+# Loud low-frequency content with essentially no treble: the high band sits at the floor
+# while the file as a whole is loud. Guards any detector that reasons about "high band is
+# empty while the signal is strong" without checking whether there was ever anything up
+# there to remove.
+ffmpeg -hide_banner -loglevel error -y \
+  -f lavfi -i "sine=frequency=55:sample_rate=44100:duration=10" \
+  -f lavfi -i "sine=frequency=110:sample_rate=44100:duration=10" \
+  -filter_complex "[0:a][1:a]amix=inputs=2:normalize=0,volume=16dB,pan=stereo|c0=c0|c1=0.99*c0" \
+  -sample_fmt s16 -c:a flac "$CORPUS_DIR/authentic_bass_only_44k.flac"
+
 echo "== Sample-rate padding ('fake hi-res' by upsampling) fixtures =="
 
 # Genuinely lossless 44.1kHz content resampled to 96kHz. No lossy encoder was ever

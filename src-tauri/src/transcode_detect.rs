@@ -30,8 +30,32 @@
 //! all — `transcoded_mp3_v0_44k.flac` and `transcoded_aac_256_44k.flac` in the corpus
 //! measure indistinguishable from genuinely lossless noise by this method. This module
 //! cannot catch that case; confidence in any "probably authentic" verdict is capped
-//! accordingly, and detecting it is left to a future indicator (e.g. quantization noise
-//! floor analysis, not implemented — see roadmap).
+//! accordingly.
+//!
+//! Two things about that blind spot are worth stating precisely, because both were
+//! understated until the corpus grew material that could show them.
+//!
+//! **It is wider than the bitrate suggests.** On non-stationary material, AAC at *128*
+//! kbps also escapes: `transcoded_dynamic_aac_128_44k.flac` lowpasses at 18.3 kHz but only
+//! at 27 dB/kHz, under [`STEEPNESS_TRANSCODE_THRESHOLD`], and lands on `Indeterminate`. The
+//! same encoder on flat noise measures ~106 dB/kHz and is caught easily. What decides it is
+//! the program material, not the bitrate.
+//!
+//! **In this branch the failure is an assertion, not a shrug.** A file with no detectable
+//! edge is reported `ProbablyAuthentic` at [`NO_EDGE_CONFIDENCE`], so a transparent
+//! transcode is not merely missed — it is actively vouched for. `corpus/README.md` has
+//! called for these to score "indéterminé, never a confident authentic" since the corpus was
+//! written, and this module does not yet meet that bar. It is left as-is deliberately rather
+//! than papered over with a lower constant: routing every no-edge file to `Indeterminate`
+//! would make the verdict useless for the genuinely lossless majority, and any number
+//! between the two would be calibrated against nothing but the corpus's own arbitrary
+//! composition.
+//!
+//! Four candidate indicators were prototyped against the corpus to close the gap —
+//! spectral holes, the codec frame grid, cutoff stability, and joint-stereo collapse. None
+//! separates a transparent encode from lossless; one of them actively flags legitimate
+//! in-the-box piano harder than it flags a real LAME transcode. The measurements are
+//! recorded in `corpus/README.md` so the next attempt does not repeat them.
 
 use serde::Serialize;
 
