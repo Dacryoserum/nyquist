@@ -15,6 +15,7 @@ use nyquist_lib::metadata::build_file_info;
 use nyquist_lib::sample_rate::analyze_sample_rate;
 use nyquist_lib::signal_analysis::analyze_signal;
 use nyquist_lib::spectral::analyze_spectrum;
+use nyquist_lib::stereo::analyze_stereo;
 use nyquist_lib::transcode_detect::{assess_transcode_risk, Verdict};
 
 struct Fixture {
@@ -403,6 +404,56 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
          got {known_misses:?} — if this shrinks, the blind spot may be narrowing: update \
          `known_undetectable` and this assertion; if it grows, something else regressed"
     );
+}
+
+/// `dual_mono` is an exact claim — the two channels are bit-identical — so it is asserted
+/// against fixtures whose construction is known rather than against a threshold.
+///
+/// This also pins down a property of the corpus itself that went unnoticed until it was
+/// measured: every fixture built with ffmpeg's `-ac 2` is a mono source upmixed, so its
+/// channels really are identical. That is why the non-stationary fixtures were built by
+/// joining two independently seeded noise sources instead, and why any future detector that
+/// reads the stereo image can only be developed against those.
+#[test]
+fn dual_mono_is_detected_exactly() {
+    let cases = [
+        ("authentic_44k_noise.flac", true),
+        ("authentic_dynamic_stereo_44k.flac", false),
+        ("transcoded_dynamic_mp3_v0_44k.flac", false),
+    ];
+
+    for (filename, expect_dual_mono) in cases {
+        let decoded = decode_file(&corpus_dir().join(filename)).expect("fixture should decode");
+        let stereo = analyze_stereo(&decoded).expect("two-channel fixture should yield stereo analysis");
+
+        assert_eq!(
+            stereo.dual_mono, expect_dual_mono,
+            "{filename}: dual_mono should be {expect_dual_mono} (correlation {:.3}, side/mid {:.1} dB)",
+            stereo.correlation, stereo.side_to_mid_db
+        );
+        assert!(
+            (-1.0..=1.0).contains(&stereo.correlation),
+            "{filename}: correlation {} outside -1..=1",
+            stereo.correlation
+        );
+        assert_eq!(stereo.per_band.len(), 3, "{filename}: expected low/mid/high bands");
+
+        if expect_dual_mono {
+            // A duplicated channel has no side content at all, so width must read at the
+            // floor rather than merely "small".
+            assert!(
+                stereo.side_to_mid_db <= -60.0,
+                "{filename}: bit-identical channels must report no width; got {} dB",
+                stereo.side_to_mid_db
+            );
+        } else {
+            assert!(
+                stereo.side_to_mid_db > -60.0,
+                "{filename}: decorrelated channels should carry measurable width; got {} dB",
+                stereo.side_to_mid_db
+            );
+        }
+    }
 }
 
 /// A pure sine is the least ambiguous authentic signal there is, and it lives in this

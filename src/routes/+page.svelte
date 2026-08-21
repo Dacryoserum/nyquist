@@ -520,6 +520,95 @@
         </dl>
       </section>
 
+      <div class="metric-columns">
+        <section class="card">
+          <h2 class="section-title">{T.spectralDetail.title}</h2>
+
+          <div class="metric">
+            <div class="metric-head">
+              <span class="label">{T.spectralDetail.stability}</span>
+              <span class="value">± {fmtHz(spa.cutoff_stability_hz)}</span>
+            </div>
+            <span class="scale-note">{T.spectralDetail.stabilityNote}</span>
+          </div>
+
+          <div class="metric">
+            <div class="metric-head">
+              <span class="label">{T.spectralDetail.stopbandDepth}</span>
+              <span class="value">
+                {spa.stopband_depth_db !== null
+                  ? `${fmt(spa.stopband_depth_db, 0)} dB`
+                  : T.spectralDetail.noStopband}
+              </span>
+            </div>
+            {#if spa.stopband_depth_db !== null}
+              <span class="scale-note">{T.spectralDetail.stopbandNote}</span>
+            {/if}
+          </div>
+
+          <!-- The spectral shape the verdict is drawn from, as a table rather than a claim:
+               an encoder wall reads as an abrupt fall between neighbours, a dark master as a
+               steady slope. -->
+          <span class="label band-label">{T.spectralDetail.bandLevels}</span>
+          <div class="bands">
+            {#each spa.band_levels_db as band (band.low_hz)}
+              <div class="band-row">
+                <span class="band-range">
+                  {fmtHz(band.low_hz)}–{band.high_hz !== null ? fmtHz(band.high_hz) : T.spectralDetail.toNyquist}
+                </span>
+                <Meter value={band.level_db} min={-90} max={0} />
+                <span class="band-value">{fmt(band.level_db, 0)}</span>
+              </div>
+            {/each}
+          </div>
+          <p class="note">{T.spectralDetail.bandLevelsNote}</p>
+        </section>
+
+        {#if result.stereo_analysis}
+          {@const st = result.stereo_analysis}
+          <section class="card">
+            <h2 class="section-title">{T.stereo.title}</h2>
+
+            <div class="metric">
+              <div class="metric-head">
+                <span class="label">{T.stereo.correlation}</span>
+                <span class="value {st.mono_compatibility_risk ? 'warn' : ''}">{fmt(st.correlation, 2)}</span>
+              </div>
+              <Meter value={st.correlation} min={-1} max={1} reference={0} referenceLabel="0" />
+              <span class="scale-note">{T.stereo.correlationNote}</span>
+            </div>
+
+            <div class="metric">
+              <div class="metric-head">
+                <span class="label">{T.stereo.width}</span>
+                <span class="value">{fmt(st.side_to_mid_db, 1)} dB</span>
+              </div>
+            </div>
+
+            {#if st.dual_mono}
+              <p class="note flag">{T.stereo.dualMonoNote}</p>
+            {:else if st.effectively_mono}
+              <p class="note flag">{T.stereo.effectivelyMono}</p>
+            {/if}
+            {#if st.mono_compatibility_risk}
+              <p class="note flag">{T.stereo.phaseRiskNote}</p>
+            {/if}
+
+            <span class="label band-label">{T.stereo.perBand}</span>
+            <div class="bands">
+              {#each st.per_band as band (band.name)}
+                <div class="band-row">
+                  <span class="band-range">{T.stereo.bandName(band.name)}</span>
+                  <Meter value={band.side_to_mid_db} min={-60} max={0} />
+                  <span class="band-value">{fmt(band.side_to_mid_db, 0)}</span>
+                </div>
+              {/each}
+            </div>
+            <p class="note">{T.stereo.note}</p>
+          </section>
+        {/if}
+      </div>
+
       <p class="disclaimer">{T.disclaimer}</p>
     {/if}
   </main>
@@ -1141,6 +1230,50 @@
     font-size: 0.73rem;
     color: var(--ink-low);
     line-height: 1.6;
+  }
+
+  /* A note that states a property of *this* file rather than explaining the panel — brought
+     up to body-text ink so it doesn't read as boilerplate the way the panel notes do. */
+  .note.flag {
+    margin-top: 0.7rem;
+    color: var(--ink-mid);
+  }
+
+  /* ── band breakdown (spectral levels, stereo width) ── */
+
+  .band-label {
+    display: block;
+    margin-top: 1.6rem;
+  }
+
+  .bands {
+    display: flex;
+    flex-direction: column;
+    gap: 0.45rem;
+    margin-top: 0.7rem;
+  }
+
+  .band-row {
+    display: grid;
+    /* Fixed label and value columns so every meter starts and ends on the same x, making
+       the column of bars readable as a spectral shape rather than as separate readings. */
+    grid-template-columns: 8.5rem 1fr 2.5rem;
+    align-items: center;
+    gap: 0.7rem;
+  }
+
+  .band-range {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--ink-low);
+    white-space: nowrap;
+  }
+
+  .band-value {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    color: var(--ink-mid);
+    text-align: right;
   }
 
   /* ── channel table ── */

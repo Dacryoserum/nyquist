@@ -6,8 +6,33 @@ releases start shipping.
 
 ## [Unreleased]
 
+### Ajouté
+
+- **Analyse de l'image stéréo** (`stereo.rs`) : corrélation L/R, rapport side/mid global et
+  par bande (graves/médiums/aigus), détection exacte du dual-mono (canaux identiques au bit
+  près) et alerte de compatibilité mono quand la corrélation est négative. C'est de
+  l'information sur le fichier, **pas** un indice de transcodage — voir ci-dessous.
+- **Détail spectral exposé** : niveaux moyens par bande de fréquence (relatifs à la bande la
+  plus forte), profondeur du stopband, et stabilité de la coupure dans le temps. La table de
+  bandes rend le verdict inspectable : un mur d'encodeur y apparaît comme une chute brutale
+  entre deux bandes voisines, un master sombre comme une pente régulière.
+- **Corpus : matériau non-stationnaire et vraie stéréo.** Sept fixtures, dont une source
+  bâtie sur deux graines de bruit décorrélées avec passages calmes, transitoires et contenu
+  tonal, plus ses transcodages MP3 128/V0 et AAC 128/256, plus deux pièges à faux positifs.
+  Le corpus précédent était intégralement du bruit stationnaire en dual-mono : tous les
+  seuils du projet avaient été calés sur un matériau qui n'exerce pas les phénomènes
+  recherchés.
+
 ### Corrigé
 
+- **Faux edge près de Nyquist.** Le balayage allait jusqu'à `nyquist − sonde`, si bien qu'un
+  candidat pouvait se poser assez haut pour que le garde-fou « la chute se maintient jusqu'à
+  Nyquist » ne mesure plus qu'une bande de quelques centaines de Hz — à ce stade il ne prouve
+  plus rien, un spectre qui descend encore le franchit. Un fichier réellement lossless avec
+  un lowpass de mastering doux à 15 kHz rapportait une coupure fantôme à 21,5 kHz. Le
+  balayage réserve maintenant 1 kHz de stopband à mesurer. Effet sur le corpus :
+  `authentic_44k_lowpass_naturally.flac` passe d'« indéterminé » à « probablement
+  authentique », aucune régression ailleurs.
 - **La liste d'indices du verdict restait en anglais.** C'est le texte le plus lu de
   l'application — la justification affichée sous le verdict — et il était écrit en dur dans
   `transcode_detect.rs`, donc hors de portée du catalogue de traduction ajouté en 0.2.0 :
@@ -19,6 +44,26 @@ releases start shipping.
 - Traduits également : les libellés de filtre des fenêtres système « ouvrir » et
   « enregistrer », la profondeur de bits (« 24 bits » et non « 24-bit »), le nombre de canaux
   et l'unité de taille de fichier (« Mo » et non « MB »).
+
+### Modifié — ce que le corpus révèle sur la détection
+
+- **Le point aveugle est plus large que documenté, et pire que « raté ».** Sur du matériau
+  non-stationnaire, l'AAC 128 s'échappe aussi (coupure à 18,3 kHz mais seulement 27 dB/kHz,
+  sous le seuil de 40) alors que le même encodeur sur du bruit plat mesure ~106 dB/kHz : ce
+  qui décide, c'est le matériau, pas le débit. Et pour LAME V0 comme pour l'AAC 256, le
+  verdict n'est pas « je ne sais pas » mais « probablement authentique » à 60 % — l'outil
+  cautionne le faux. `corpus/README.md` réclamait « indéterminé, jamais un authentique
+  confiant » depuis l'écriture du corpus ; c'est désormais mesuré et affirmé par les tests
+  plutôt que noté en passant. Le rapport FP/FN passe de 2 à 5 ratés documentés, sans aucun
+  faux positif.
+- **Quatre pistes prototypées contre le point aveugle, aucune livrée.** Trous spectraux
+  (attrape LAME V0 avec une marge nette, mais accuse un piano « in the box » *plus fort*
+  qu'un vrai transcodage), grille de trames du codec (aucun signal — le recouvrement TDAC
+  lisse la périodicité), stabilité de la coupure (résultat inversé : un lowpass de mastering
+  est aussi fixe que celui d'un codec), effondrement stéréo joint (aucune séparation). Les
+  mesures sont consignées dans `corpus/README.md` pour que la prochaine tentative ne les
+  refasse pas. Les deux dernières sont exposées comme information, jamais comme score.
+
 
 ### Modifié
 

@@ -141,8 +141,46 @@ pub struct SpectralAnalysis {
     /// miss it. Same length/time alignment as `spectrogram.time_bin_count`. Still a raw
     /// measurement, not a verdict.
     pub cutoff_over_time_hz: Vec<f64>,
+    /// Standard deviation of `cutoff_over_time_hz` over the bins where a cutoff was
+    /// measurable at all, in Hz — how much the top of the content wanders across the track.
+    ///
+    /// **Reported, never scored.** The obvious-sounding rule ("a codec's lowpass is a fixed
+    /// filter, so a stable edge means a codec") was tested against the corpus and comes out
+    /// backwards: a mastering lowpass is *also* a fixed filter, and the authentic
+    /// naturally-dark fixtures measure a stability of 0 Hz while real LAME and AAC
+    /// transcodes wander by 33-252 Hz. Wiring this into the verdict in either direction
+    /// would make things worse, not better.
+    pub cutoff_stability_hz: f64,
+    /// Steady-state level of a handful of named bands, in dB relative to the loudest of
+    /// them. Lets a reader see the spectral shape the verdict was derived from — a dark
+    /// master and an encoder lowpass produce very different tables here — instead of taking
+    /// a single cutoff number on trust.
+    pub band_levels_db: Vec<BandLevel>,
+    /// How far the region above `encoder_edge_hz` sits below the region below it, in dB.
+    /// `None` when no edge was found. This is the "sustained drop" that
+    /// [`find_spectral_edge`]'s second gate tests, surfaced so the gate's own evidence is
+    /// visible rather than implicit in a pass/fail.
+    pub stopband_depth_db: Option<f64>,
     pub spectrogram: SpectrogramData,
 }
+
+/// Steady-state level of one named frequency band.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BandLevel {
+    pub low_hz: f64,
+    /// `None` for the band that runs to Nyquist.
+    pub high_hz: Option<f64>,
+    /// Relative to the loudest band in the same file, so the table is comparable across
+    /// files of different absolute levels. Always ≤ 0.
+    pub level_db: f64,
+}
+
+/// Band edges for [`SpectralAnalysis::band_levels_db`], in Hz. Roughly octave-spaced in the
+/// region where a codec lowpass can sit, coarser below it where nothing interesting to this
+/// tool happens. The last band is closed at Nyquist per file.
+const REPORTED_BAND_EDGES_HZ: [f64; 8] =
+    [0.0, 500.0, 2_000.0, 6_000.0, 10_000.0, 14_000.0, 18_000.0, 20_000.0];
 
 pub fn analyze_spectrum(decoded: &DecodedAudio) -> Result<SpectralAnalysis, String> {
     if decoded.sample_rate == 0 || decoded.channels == 0 {
@@ -247,11 +285,24 @@ pub fn analyze_spectrum(decoded: &DecodedAudio) -> Result<SpectralAnalysis, Stri
     let cutoff_over_time_hz =
         cutoff_over_time(&frames_db, raw_bin_count, nyquist_hz, time_bin_count, global_peak_db);
 
+    // Measured on the same steady-state envelope the verdict is derived from, so the table
+    // a reader inspects is literally the evidence, not a second pass that could disagree.
+    let band_levels_db = reported_band_levels(&mean_db, raw_bin_count, nyquist_hz);
+    let stopband_depth_db = encoder_edge_hz.map(|edge_hz| {
+        let passband = band_level_db(&mean_db, edge_hz - STEEPNESS_PROBE_HZ, edge_hz, raw_bin_count, nyquist_hz);
+        let stopband =
+            band_level_db(&mean_db, edge_hz + STEEPNESS_PROBE_HZ, nyquist_hz, raw_bin_count, nyquist_hz);
+        (passband - stopband) as f64
+    });
+
     Ok(SpectralAnalysis {
         spectral_cutoff_hz,
         rolloff_steepness_db_per_khz,
         encoder_edge_hz,
+        cutoff_stability_hz: cutoff_stability(&cutoff_over_time_hz),
         cutoff_over_time_hz,
+        band_levels_db,
+        stopband_depth_db,
         spectrogram: SpectrogramData {
             time_bin_count,
             frequency_bin_count,
@@ -262,6 +313,51 @@ pub fn analyze_spectrum(decoded: &DecodedAudio) -> Result<SpectralAnalysis, Stri
     })
 }
 
+
+/// Standard deviation of the per-time-bin cutoff, over the bins where one was measurable.
+///
+/// Bins reading exactly 0 are excluded rather than averaged in as zero: `detect_cutoff_in_frames`
+/// returns 0 for a window with no energy within the threshold at all (silence, a gap between
+/// movements), and counting those as "the content ends at DC" would report a track with a
+/// lead-in as wildly unstable purely because of its lead-in.
+fn cutoff_stability(cutoff_over_time_hz: &[f64]) -> f64 {
+    let measured: Vec<f64> = cutoff_over_time_hz.iter().copied().filter(|&hz| hz > 0.0).collect();
+    if measured.len() < 2 {
+        return 0.0;
+    }
+    let mean = measured.iter().sum::<f64>() / measured.len() as f64;
+    let variance = measured.iter().map(|&hz| (hz - mean).powi(2)).sum::<f64>() / measured.len() as f64;
+    variance.sqrt()
+}
+
+/// Level of each [`REPORTED_BAND_EDGES_HZ`] band, normalized against the loudest band so the
+/// table reads the same whatever the file's absolute level. Bands starting at or above
+/// Nyquist are dropped rather than reported at the floor — a 44.1 kHz file has no 20 kHz+
+/// band to describe, and printing one at -180 dB would look like a finding.
+fn reported_band_levels(mean_db: &[f32], raw_bin_count: usize, nyquist_hz: f64) -> Vec<BandLevel> {
+    let mut bands: Vec<BandLevel> = Vec::new();
+    for (i, &low_hz) in REPORTED_BAND_EDGES_HZ.iter().enumerate() {
+        if low_hz >= nyquist_hz {
+            break;
+        }
+        let next = REPORTED_BAND_EDGES_HZ.get(i + 1).copied();
+        let high_hz = next.filter(|&hz| hz < nyquist_hz);
+        let upper = high_hz.unwrap_or(nyquist_hz);
+        bands.push(BandLevel {
+            low_hz,
+            high_hz,
+            level_db: band_level_db(mean_db, low_hz, upper, raw_bin_count, nyquist_hz) as f64,
+        });
+    }
+
+    let loudest = bands.iter().map(|b| b.level_db).fold(f64::NEG_INFINITY, f64::max);
+    if loudest.is_finite() {
+        for band in &mut bands {
+            band.level_db -= loudest;
+        }
+    }
+    bands
+}
 
 /// Number of frames held in a flat `[frame][bin]` buffer.
 fn frame_count_of(frames_db: &[f32], raw_bin_count: usize) -> usize {

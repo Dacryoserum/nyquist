@@ -142,6 +142,31 @@ interface Dict {
     /** Megabyte: "MB" in English, "Mo" (mégaoctet) in French. */
     megabytes: (value: string) => string;
   };
+  stereo: {
+    title: string;
+    correlation: string;
+    correlationNote: string;
+    width: string;
+    dualMono: string;
+    dualMonoNote: string;
+    effectivelyMono: string;
+    phaseRisk: string;
+    phaseRiskNote: string;
+    perBand: string;
+    bandName: (name: string) => string;
+    note: string;
+  };
+  spectralDetail: {
+    title: string;
+    stability: string;
+    stabilityNote: string;
+    stopbandDepth: string;
+    stopbandNote: string;
+    noStopband: string;
+    bandLevels: string;
+    bandLevelsNote: string;
+    toNyquist: string;
+  };
   disclaimer: string;
   player: { play: string; pause: string; playbackPosition: string; mute: string; unmute: string; volume: string };
   spectrogram: { seekAria: string; canvasAria: string; rawCutoff: (freq: string) => string };
@@ -280,6 +305,31 @@ const fr: Dict = {
     channelCount: (channels) => `${channels} canaux`,
     megabytes: (value) => `${value} Mo`
   },
+  stereo: {
+    title: "Image stéréo",
+    correlation: "Corrélation L/R",
+    correlationNote: "1 = canaux identiques, 0 = contenus indépendants, négatif = hors phase",
+    width: "Side / Mid",
+    dualMono: "Dual-mono",
+    dualMonoNote: "Les deux canaux sont identiques au bit près : du mono dans un conteneur stéréo.",
+    effectivelyMono: "Largeur négligeable",
+    phaseRisk: "Risque en mono",
+    phaseRiskNote: "Corrélation négative : sommer ce fichier en mono annulera du contenu au lieu de simplement le resserrer. Typique d'un élargissement stéréo artificiel.",
+    perBand: "Largeur par bande",
+    bandName: (name) => (name === "low" ? "Graves" : name === "mid" ? "Médiums" : "Aigus"),
+    note: "Information sur le fichier, pas un indice de transcodage. Les encodeurs avec perte laissent bien une signature dans l'image stéréo, mais mesurée sur le corpus de ce projet elle ne sépare pas un encodage transparent de sa source sans perte — voir stereo.rs."
+  },
+  spectralDetail: {
+    title: "Détail spectral",
+    stability: "Stabilité de la coupure",
+    stabilityNote: "dispersion du haut du contenu sur la durée du morceau — mesure rapportée, jamais utilisée dans le verdict : un lowpass de mastering est aussi fixe que celui d'un codec",
+    stopbandDepth: "Profondeur du stopband",
+    stopbandNote: "de combien la zone au-dessus de la coupure descend sous celle du dessous",
+    noStopband: "aucune coupure détectée",
+    bandLevels: "Niveaux par bande",
+    bandLevelsNote: "Niveau moyen de chaque bande, relatif à la plus forte du fichier. C'est la forme spectrale dont le verdict est tiré : un mur d'encodeur y apparaît comme une chute brutale entre deux bandes voisines, un master sombre comme une pente régulière.",
+    toNyquist: "Nyquist"
+  },
   disclaimer:
     "Nyquist rapporte ce qu'il peut mesurer et le dit clairement quand ce n'est pas suffisant. Le verdict de transcodage repose surtout sur la forme de la pente spectrale, qui ne peut pas détecter un encodage transparent comme LAME V0 ou AAC 256 — un résultat propre n'est pas une preuve de provenance.",
   player: {
@@ -407,6 +457,31 @@ const en: Dict = {
     bits: (depth) => `${depth}-bit`,
     channelCount: (channels) => `${channels}ch`,
     megabytes: (value) => `${value} MB`
+  },
+  stereo: {
+    title: "Stereo image",
+    correlation: "L/R correlation",
+    correlationNote: "1 = identical channels, 0 = unrelated content, negative = out of phase",
+    width: "Side / Mid",
+    dualMono: "Dual mono",
+    dualMonoNote: "The two channels are bit-identical: mono content in a stereo container.",
+    effectivelyMono: "Negligible width",
+    phaseRisk: "Mono risk",
+    phaseRiskNote: "Negative correlation: summing this file to mono will cancel content rather than just narrow it. Typically an artificially widened master.",
+    perBand: "Width per band",
+    bandName: (name) => (name === "low" ? "Low" : name === "mid" ? "Mid" : "High"),
+    note: "Information about the file, not a transcode signal. Lossy encoders do leave a stereo fingerprint, but measured across this project's corpus it does not separate a transparent encode from its lossless source — see stereo.rs."
+  },
+  spectralDetail: {
+    title: "Spectral detail",
+    stability: "Cutoff stability",
+    stabilityNote: "how much the top of the content wanders across the track — reported, never scored: a mastering lowpass is as fixed as a codec's",
+    stopbandDepth: "Stopband depth",
+    stopbandNote: "how far the region above the cutoff sits below the region under it",
+    noStopband: "no edge found",
+    bandLevels: "Band levels",
+    bandLevelsNote: "Average level of each band, relative to the loudest in the file. This is the spectral shape the verdict is drawn from: an encoder wall shows up as an abrupt fall between neighbouring bands, a dark master as a steady slope.",
+    toNyquist: "Nyquist"
   },
   disclaimer:
     "Nyquist reports what it can measure and says so when that is not enough. The transcode verdict rests mainly on the shape of the spectral rolloff, which cannot see a transparent encode such as LAME V0 or AAC 256 — a clean result is not proof of provenance.",
