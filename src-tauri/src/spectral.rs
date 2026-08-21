@@ -77,6 +77,19 @@ const BANDWIDTH_PROBE_HZ: f64 = 2_500.0;
 /// reads as an infinitely steep brick wall. Gating on plausibility here is what stops a
 /// pure sine — the most unambiguously authentic signal there is — from being accused.
 const MIN_PLAUSIBLE_ENCODER_CUTOFF_HZ: f64 = 8_000.0;
+/// How much room the sustained-drop gate needs above a candidate edge before its verdict
+/// means anything.
+///
+/// That gate asks whether the spectrum *stays* down from the candidate all the way to
+/// Nyquist. Scanning to `nyquist - probe` let candidates land close enough to the top that
+/// the region it averages over was a few hundred Hz wide — at which point "stays down"
+/// stops being evidence, because a spectrum that is merely still falling clears it. A
+/// genuinely lossless file with a gentle 15 kHz mastering lowpass reported a spurious edge
+/// at 21.5 kHz (the very last candidate position) and dropped from "probably authentic" to
+/// "indeterminate" on the strength of it. Requiring a full kHz of stopband to measure —
+/// roughly 90 FFT bins at 44.1 kHz — costs nothing real: LAME's highest lowpass sits at
+/// 20.5 kHz, which still clears this with room to spare.
+const MIN_STOPBAND_WIDTH_HZ: f64 = 1_000.0;
 /// A real encoder lowpass cuts off *broadband* content: the spectrum runs at a sustained
 /// level right up to the edge and then falls off a cliff. Tonal content instead reaches
 /// its highest partial and stops, with mostly noise floor underneath. Requiring the octave
@@ -438,7 +451,9 @@ fn find_spectral_edge(
     nyquist_hz: f64,
     probe_hz: f64,
 ) -> Option<(f64, f64)> {
-    let scan_end = nyquist_hz - probe_hz;
+    // Stop far enough below Nyquist that the sustained-drop gate below still has a real
+    // band to average over — see MIN_STOPBAND_WIDTH_HZ.
+    let scan_end = nyquist_hz - probe_hz - MIN_STOPBAND_WIDTH_HZ;
     if MIN_PLAUSIBLE_ENCODER_CUTOFF_HZ >= scan_end {
         return None;
     }
