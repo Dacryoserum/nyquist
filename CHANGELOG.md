@@ -6,6 +6,8 @@ releases start shipping.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-08-21
+
 ### Ajouté
 
 - **Analyse de l'image stéréo** (`stereo.rs`) : corrélation L/R, rapport side/mid global et
