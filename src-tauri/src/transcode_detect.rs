@@ -97,7 +97,127 @@ pub struct TranscodeAssessment {
     pub confidence_score: f64,
     /// Human-readable evidence, one entry per contributing observation. Always non-empty
     /// — a verdict with no stated indicators is not acceptable in this codebase.
-    pub indicators: Vec<String>,
+    pub indicators: Vec<Indicator>,
+}
+
+/// One piece of stated evidence behind a verdict.
+///
+/// Carries the same claim twice, on purpose. `message` is the English prose this module
+/// authors: it is what `nyquist-cli` prints and what an exported JSON report preserves, so
+/// a report stays readable and diffable no matter which language the UI was in when it was
+/// produced. `detail` is the same observation as a code plus its raw measurements, which
+/// lets the UI re-render the sentence in the user's language (see `src/lib/i18n.svelte.ts`)
+/// instead of showing backend English inside a translated interface.
+///
+/// The prose is derived from the detail by [`IndicatorDetail::english`], never written at
+/// the call site, so the two cannot drift apart.
+#[derive(Debug, Serialize)]
+pub struct Indicator {
+    pub message: String,
+    #[serde(flatten)]
+    pub detail: IndicatorDetail,
+}
+
+impl Indicator {
+    fn new(detail: IndicatorDetail) -> Self {
+        Self { message: detail.english(), detail }
+    }
+}
+
+/// The closed set of observations this module can make, with the numbers each one quotes.
+///
+/// Serialized internally tagged on `code` and flattened into [`Indicator`], so an entry
+/// reads `{"message": "...", "code": "sharp_rolloff", "steepness_db_per_khz": 92.4, ...}`.
+/// Adding a variant is a frontend-visible change: `src/lib/api.ts` and the translation
+/// switch in `src/lib/i18n.svelte.ts` must gain it in the same PR, and `npm run check`
+/// fails until they do.
+///
+/// Frequencies are in kHz rather than Hz because that is the unit every message quotes;
+/// keeping the conversion here means the UI formats a number instead of re-deriving one.
+#[derive(Debug, Serialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+pub enum IndicatorDetail {
+    /// A container tag names an encoder that only ever produces lossy output.
+    EncoderTagMatched {
+        tag_key: String,
+        tag_value: String,
+        matched_pattern: String,
+        /// Further matching tags beyond the one quoted, 0 when it was the only one.
+        additional_matches: usize,
+    },
+    /// Caveat attached when the spectrum was inconclusive and the tag carries the verdict.
+    TagIsOnlyEvidence,
+    /// Caveat attached when a lossy encoder tag contradicts a full-bandwidth spectrum.
+    TagContradictsSpectrum,
+    /// Degenerate input: no usable sample rate, so no spectral claim can be made.
+    InvalidSampleRate,
+    /// A rolloff steep enough to read as a codec's lowpass rather than mix/mastering.
+    SharpRolloff { steepness_db_per_khz: f64, edge_khz: f64 },
+    /// The scan ran the whole plausible encoder range and found no lowpass anywhere.
+    NoEncoderLowpass { scanned_from_khz: f64, nyquist_khz: f64 },
+    /// The blind spot from the module docs, stated alongside every "authentic" verdict.
+    TransparentEncodeUnseen,
+    /// An edge exists but is too gradual to attribute to a codec either way.
+    GradualRolloff { cutoff_khz: f64, steepness_db_per_khz: f64 },
+}
+
+impl IndicatorDetail {
+    /// The reference wording for this observation. Single source of the English prose:
+    /// the CLI, the JSON export and the English UI all end up rendering this exact string.
+    fn english(&self) -> String {
+        match self {
+            Self::EncoderTagMatched { tag_key, tag_value, matched_pattern, additional_matches } => {
+                format!(
+                    "Encoder tag \"{}\" reads \"{}\", matching the lossy-only encoder \"{}\"{}.",
+                    tag_key,
+                    tag_value,
+                    matched_pattern,
+                    if *additional_matches > 0 {
+                        format!(", plus {additional_matches} more matching tag(s)")
+                    } else {
+                        String::new()
+                    }
+                )
+            }
+            Self::TagIsOnlyEvidence => "The spectrum alone was inconclusive, so this verdict \
+                 rests on the tag — which can be stale, copied from a source file, or simply \
+                 wrong."
+                .to_string(),
+            Self::TagContradictsSpectrum => "This contradicts the spectral measurement above, \
+                 which found no encoder cutoff. Either the tag is left over from an earlier \
+                 step in the file's history and the audio really is lossless, or it was a \
+                 transparent lossy encode that this method cannot see. Reported as \
+                 inconclusive rather than letting either signal overrule the other."
+                .to_string(),
+            Self::InvalidSampleRate => {
+                "Invalid sample rate; cannot evaluate spectral content.".to_string()
+            }
+            Self::SharpRolloff { steepness_db_per_khz, edge_khz } => format!(
+                "Sharp spectral rolloff (~{steepness_db_per_khz:.0} dB/kHz) around \
+                 {edge_khz:.1} kHz — steep enough to match a lossy encoder's lowpass filter \
+                 rather than natural mix/mastering content (natural rolloff measured well \
+                 under 20 dB/kHz across this project's test corpus, real and synthetic)."
+            ),
+            Self::NoEncoderLowpass { scanned_from_khz, nyquist_khz } => format!(
+                "No encoder lowpass found: the spectrum was scanned from \
+                 {scanned_from_khz:.0} kHz to the {nyquist_khz:.1} kHz Nyquist frequency and \
+                 no point showed the sharp drop into a sustained empty band that a lossy \
+                 codec leaves behind."
+            ),
+            Self::TransparentEncodeUnseen => "This does not rule out a transparent lossy \
+                 encode (e.g. LAME V0, AAC 256kbps) — this project's own corpus shows those \
+                 measuring indistinguishable from lossless by this method. Confidence is \
+                 capped accordingly."
+                .to_string(),
+            Self::GradualRolloff { cutoff_khz, steepness_db_per_khz } => format!(
+                "Content stops around {cutoff_khz:.1} kHz, but the transition there is \
+                 gradual (~{steepness_db_per_khz:.0} dB/kHz) rather than the near-vertical \
+                 wall a codec produces. That is consistent with a deliberately dark master, \
+                 a vinyl or tape transfer, or a lossy encode whose filter this method cannot \
+                 separate from those — not enough to call it either way."
+            ),
+        }
+    }
 }
 
 pub fn assess_transcode_risk(
@@ -125,18 +245,12 @@ pub fn assess_transcode_risk(
 fn apply_tag_evidence(assessment: &mut TranscodeAssessment, matches: &[EncoderTagMatch]) {
     let Some(first) = matches.first() else { return };
 
-    let indicator = format!(
-        "Encoder tag \"{}\" reads \"{}\", matching the lossy-only encoder \"{}\"{}.",
-        first.tag_key,
-        first.tag_value,
-        first.matched_pattern,
-        if matches.len() > 1 {
-            format!(", plus {} more matching tag(s)", matches.len() - 1)
-        } else {
-            String::new()
-        }
-    );
-    assessment.indicators.push(indicator);
+    assessment.indicators.push(Indicator::new(IndicatorDetail::EncoderTagMatched {
+        tag_key: first.tag_key.clone(),
+        tag_value: first.tag_value.clone(),
+        matched_pattern: first.matched_pattern.clone(),
+        additional_matches: matches.len() - 1,
+    }));
 
     match assessment.verdict {
         // Two independent signals agreeing is stronger than either alone.
@@ -148,24 +262,13 @@ fn apply_tag_evidence(assessment: &mut TranscodeAssessment, matches: &[EncoderTa
         Verdict::Indeterminate => {
             assessment.verdict = Verdict::ProbablyTranscoded;
             assessment.confidence_score = TAG_MATCH_ONLY_CONFIDENCE;
-            assessment.indicators.push(
-                "The spectrum alone was inconclusive, so this verdict rests on the tag — which \
-                 can be stale, copied from a source file, or simply wrong."
-                    .to_string(),
-            );
+            assessment.indicators.push(Indicator::new(IndicatorDetail::TagIsOnlyEvidence));
         }
         // Direct conflict: measurement says full bandwidth, metadata says lossy tool.
         Verdict::ProbablyAuthentic => {
             assessment.verdict = Verdict::Indeterminate;
             assessment.confidence_score = TAG_CONFLICT_CONFIDENCE;
-            assessment.indicators.push(
-                "This contradicts the spectral measurement above, which found no encoder \
-                 cutoff. Either the tag is left over from an earlier step in the file's \
-                 history and the audio really is lossless, or it was a transparent lossy \
-                 encode that this method cannot see. Reported as inconclusive rather than \
-                 letting either signal overrule the other."
-                    .to_string(),
-            );
+            assessment.indicators.push(Indicator::new(IndicatorDetail::TagContradictsSpectrum));
         }
     }
 }
@@ -175,7 +278,7 @@ fn assess_from_spectrum(spectral: &SpectralAnalysis, nyquist_hz: f64) -> Transco
         return TranscodeAssessment {
             verdict: Verdict::Indeterminate,
             confidence_score: 0.0,
-            indicators: vec!["Invalid sample rate; cannot evaluate spectral content.".to_string()],
+            indicators: vec![Indicator::new(IndicatorDetail::InvalidSampleRate)],
         };
     }
 
@@ -191,13 +294,10 @@ fn assess_from_spectrum(spectral: &SpectralAnalysis, nyquist_hz: f64) -> Transco
         return TranscodeAssessment {
             verdict: Verdict::ProbablyTranscoded,
             confidence_score: 0.5 + 0.3 * strength,
-            indicators: vec![format!(
-                "Sharp spectral rolloff (~{:.0} dB/kHz) around {:.1} kHz — steep enough to \
-                 match a lossy encoder's lowpass filter rather than natural mix/mastering \
-                 content (natural rolloff measured well under 20 dB/kHz across this \
-                 project's test corpus, real and synthetic).",
-                steepness, edge_khz
-            )],
+            indicators: vec![Indicator::new(IndicatorDetail::SharpRolloff {
+                steepness_db_per_khz: steepness,
+                edge_khz,
+            })],
         };
     }
 
@@ -214,18 +314,11 @@ fn assess_from_spectrum(spectral: &SpectralAnalysis, nyquist_hz: f64) -> Transco
             verdict: Verdict::ProbablyAuthentic,
             confidence_score: NO_EDGE_CONFIDENCE,
             indicators: vec![
-                format!(
-                    "No encoder lowpass found: the spectrum was scanned from {:.0} kHz to the \
-                     {:.1} kHz Nyquist frequency and no point showed the sharp drop into a \
-                     sustained empty band that a lossy codec leaves behind.",
-                    MIN_SCANNED_KHZ,
-                    nyquist_hz / 1000.0
-                ),
-                "This does not rule out a transparent lossy encode (e.g. LAME V0, AAC \
-                 256kbps) — this project's own corpus shows those measuring \
-                 indistinguishable from lossless by this method. Confidence is capped \
-                 accordingly."
-                    .to_string(),
+                Indicator::new(IndicatorDetail::NoEncoderLowpass {
+                    scanned_from_khz: MIN_SCANNED_KHZ,
+                    nyquist_khz: nyquist_hz / 1000.0,
+                }),
+                Indicator::new(IndicatorDetail::TransparentEncodeUnseen),
             ],
         };
     }
@@ -235,14 +328,9 @@ fn assess_from_spectrum(spectral: &SpectralAnalysis, nyquist_hz: f64) -> Transco
     TranscodeAssessment {
         verdict: Verdict::Indeterminate,
         confidence_score: 0.3,
-        indicators: vec![format!(
-            "Content stops around {:.1} kHz, but the transition there is gradual \
-             (~{:.0} dB/kHz) rather than the near-vertical wall a codec produces. That is \
-             consistent with a deliberately dark master, a vinyl or tape transfer, or a \
-             lossy encode whose filter this method cannot separate from those — not enough \
-             to call it either way.",
-            spectral.spectral_cutoff_hz / 1000.0,
-            steepness
-        )],
+        indicators: vec![Indicator::new(IndicatorDetail::GradualRolloff {
+            cutoff_khz: spectral.spectral_cutoff_hz / 1000.0,
+            steepness_db_per_khz: steepness,
+        })],
     }
 }

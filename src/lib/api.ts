@@ -71,12 +71,42 @@ export interface SpectralAnalysis {
 
 export type Verdict = "probably_authentic" | "probably_transcoded" | "indeterminate";
 
+/** One stated observation behind a verdict, discriminated on `code`.
+ *
+ * Mirrors `IndicatorDetail` in transcode_detect.rs, which serializes the tag flattened
+ * alongside `message` (see `Indicator` below). Frequencies arrive in kHz because that is
+ * the unit every message quotes. Adding a variant here without adding it to the `indicator`
+ * switch in i18n.svelte.ts is a type error, which is the point. */
+export type IndicatorDetail =
+  | {
+      code: "encoder_tag_matched";
+      tag_key: string;
+      tag_value: string;
+      matched_pattern: string;
+      /** Further matching tags beyond the one quoted; 0 when it was the only one. */
+      additional_matches: number;
+    }
+  | { code: "tag_is_only_evidence" }
+  | { code: "tag_contradicts_spectrum" }
+  | { code: "invalid_sample_rate" }
+  | { code: "sharp_rolloff"; steepness_db_per_khz: number; edge_khz: number }
+  | { code: "no_encoder_lowpass"; scanned_from_khz: number; nyquist_khz: number }
+  | { code: "transparent_encode_unseen" }
+  | { code: "gradual_rolloff"; cutoff_khz: number; steepness_db_per_khz: number };
+
+/** A piece of evidence, carrying the backend's English prose *and* the raw observation.
+ *
+ * `message` is what the CLI prints and what an exported report preserves, so a report reads
+ * the same whatever language the UI was in. The UI renders it directly in English and
+ * re-composes it from `code` + measurements in French — see `indicator` in i18n.svelte.ts. */
+export type Indicator = { message: string } & IndicatorDetail;
+
 export interface TranscodeAssessment {
   verdict: Verdict;
   /** Confidence in the *stated* verdict, 0-1 — deliberately conservative, see
    * transcode_detect.rs module docs. Not a probability of authenticity. */
   confidence_score: number;
-  indicators: string[];
+  indicators: Indicator[];
 }
 
 export interface EncoderTagMatch {

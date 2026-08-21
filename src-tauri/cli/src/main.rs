@@ -155,7 +155,9 @@ fn print_human_readable(r: &AnalysisResult) {
     );
     println!("  Verdict:           {:?} (confidence {:.0}%)", ta.verdict, ta.confidence_score * 100.0);
     for indicator in &ta.indicators {
-        println!("    - {indicator}");
+        // `message` rather than the structured detail beside it: the CLI is English-only by
+        // design, and this is the same prose the JSON report carries.
+        println!("    - {}", indicator.message);
     }
     println!();
 }

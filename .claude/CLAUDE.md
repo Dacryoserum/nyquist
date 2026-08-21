@@ -130,7 +130,11 @@ Défini par `AnalysisResult` dans `src-tauri/src/analysis.rs` (miroir TypeScript
 temps, `spectrogram` : intensité u8 quantifiée downsamplée — `TARGET_TIME_BINS`/
 `TARGET_FREQUENCY_BINS` dans `spectral.rs` — puis base64-encodée ; jamais la matrice dense,
 voir la skill `tauri-ipc-contract`) + `transcode_assessment` (verdict 3 états +
-`confidence_score` + `indicators[]`) + `encoder_tag_matches` + `bit_depth_analysis`.
+`confidence_score` + `indicators[]` : chaque indice porte la prose anglaise du backend
+(`message`, ce que voient le CLI et le JSON exporté) **et** son `code` + ses mesures brutes,
+pour que l'UI recompose la phrase en français — ajouter une variante à `IndicatorDetail`
+oblige à traduire dans `i18n.svelte.ts`, sinon `npm run check` échoue) +
+`encoder_tag_matches` + `bit_depth_analysis`.
 Payload mesuré ~240KB pour un FLAC de 6:52, calcul total ~2.4s en release (voir CONTEXT.md).
 Deux autres commandes IPC : `authorize_playback(path)` (juste avant `convertFileSrc(path)`
 côté frontend pour la lecture) et `export_report(path, json)` (le frontend sérialise et

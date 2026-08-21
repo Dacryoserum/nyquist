@@ -4,9 +4,16 @@
  * `t` re-renders when the toggle fires, with no provider/context wiring needed for a
  * single-page app.
  *
+ * The verdict's evidence list is the one part not authored here. Those sentences come from
+ * `transcode_detect.rs` as a code plus its measurements, and `Dict.indicator` re-composes
+ * them: English by handing back the backend's own prose (so the UI, the CLI and an exported
+ * report all state the verdict identically), French by rewriting it from the same numbers.
+ *
  * Backend error strings (from `analyzeFile`/Rust) are not covered here — they are
  * technical/debug text, not part of this catalogue.
  */
+
+import type { Indicator } from "$lib/api";
 
 export type Lang = "fr" | "en";
 
@@ -51,6 +58,8 @@ export function toggleLang() {
 interface Dict {
   brand: { tagline: string };
   actions: { openAnother: string; exportJson: string; switchTheme: string; switchLang: string };
+  /** Names shown in the OS file picker / save dialog, which is chrome we still own. */
+  dialogs: { audioFiles: string; jsonFiles: string };
   dropzone: { title: string; subtitle: string; chooseFile: string };
   loading: { text: string; hint: string };
   dragOverlay: string;
@@ -60,6 +69,11 @@ interface Dict {
     indeterminate: { label: string; blurb: string };
     confidence: string;
   };
+  /** Renders one piece of the verdict's evidence. Exhaustive over `Indicator["code"]` in
+   * both languages — a new indicator variant in transcode_detect.rs fails `npm run check`
+   * until it is translated, so backend evidence can never silently reach a French UI in
+   * English. */
+  indicator: (indicator: Indicator) => string;
   findings: {
     checksumMismatchTitle: string;
     checksumMismatchDetail: string;
@@ -122,6 +136,11 @@ interface Dict {
     integrityNoChecksum: string;
     integrityUnavailable: string;
     stereo: string;
+    /** "24-bit" vs "24 bits" — the hyphenated compound is English-only. */
+    bits: (depth: number) => string;
+    channelCount: (channels: number) => string;
+    /** Megabyte: "MB" in English, "Mo" (mégaoctet) in French. */
+    megabytes: (value: string) => string;
   };
   disclaimer: string;
   player: { play: string; pause: string; playbackPosition: string; mute: string; unmute: string; volume: string };
@@ -136,6 +155,7 @@ const fr: Dict = {
     switchTheme: "Changer de thème",
     switchLang: "Afficher l'application en anglais"
   },
+  dialogs: { audioFiles: "Fichiers audio", jsonFiles: "Fichiers JSON" },
   dropzone: {
     title: "Déposez un fichier audio ici",
     subtitle: "FLAC, ALAC, WAV, MP3, AAC ou OGG. Rien ne quitte votre machine.",
@@ -160,6 +180,32 @@ const fr: Dict = {
       blurb: "Pas assez d'éléments dans un sens ou dans l'autre. C'est une réponse à part entière, pas un échec."
     },
     confidence: "confiance"
+  },
+  indicator: (i) => {
+    switch (i.code) {
+      case "encoder_tag_matched":
+        return `Le tag d'encodeur « ${i.tag_key} » vaut « ${i.tag_value} », ce qui correspond à l'encodeur exclusivement avec perte « ${i.matched_pattern} »${
+          i.additional_matches > 0
+            ? i.additional_matches > 1
+              ? `, plus ${i.additional_matches} autres tags correspondants`
+              : ", plus un autre tag correspondant"
+            : ""
+        }.`;
+      case "tag_is_only_evidence":
+        return "Le spectre seul n'a rien permis de conclure : ce verdict repose donc sur le tag — qui peut être obsolète, recopié depuis un fichier source, ou tout simplement faux.";
+      case "tag_contradicts_spectrum":
+        return "Ceci contredit la mesure spectrale ci-dessus, qui n'a trouvé aucune coupure d'encodeur. Soit le tag est un reliquat d'une étape antérieure de l'histoire du fichier et l'audio est réellement sans perte, soit il s'agissait d'un encodage avec perte transparent que cette méthode ne peut pas voir. Rapporté comme indéterminé plutôt que de laisser l'un des deux signaux l'emporter sur l'autre.";
+      case "invalid_sample_rate":
+        return "Fréquence d'échantillonnage invalide ; impossible d'évaluer le contenu spectral.";
+      case "sharp_rolloff":
+        return `Coupure spectrale franche (~${fmtNumber(i.steepness_db_per_khz, 0)} dB/kHz) autour de ${fmtNumber(i.edge_khz, 1)} kHz — assez raide pour correspondre au filtre passe-bas d'un encodeur avec perte plutôt qu'à un contenu de mixage ou de mastering naturel (la pente naturelle mesurée reste bien en dessous de 20 dB/kHz sur tout le corpus de test du projet, réel comme synthétique).`;
+      case "no_encoder_lowpass":
+        return `Aucun passe-bas d'encodeur trouvé : le spectre a été balayé depuis ${fmtNumber(i.scanned_from_khz, 0)} kHz jusqu'à la fréquence de Nyquist de ${fmtNumber(i.nyquist_khz, 1)} kHz, et aucun point n'a montré la chute nette vers une bande vide durable que laisse un codec avec perte.`;
+      case "transparent_encode_unseen":
+        return "Cela n'exclut pas un encodage avec perte transparent (par ex. LAME V0, AAC 256 kbps) — le corpus du projet montre que ceux-ci se mesurent de façon indiscernable du sans perte par cette méthode. La confiance est plafonnée en conséquence.";
+      case "gradual_rolloff":
+        return `Le contenu s'arrête autour de ${fmtNumber(i.cutoff_khz, 1)} kHz, mais la transition y est progressive (~${fmtNumber(i.steepness_db_per_khz, 0)} dB/kHz) plutôt que le mur quasi vertical que produit un codec. C'est compatible avec un master volontairement sombre, un report de vinyle ou de bande, ou un encodage avec perte dont cette méthode ne peut pas distinguer le filtre — pas de quoi trancher dans un sens ou dans l'autre.`;
+    }
   },
   findings: {
     checksumMismatchTitle: "Somme de contrôle invalide",
@@ -229,7 +275,10 @@ const fr: Dict = {
     integrityMismatch: "Somme de contrôle invalide",
     integrityNoChecksum: "Aucune somme de contrôle stockée",
     integrityUnavailable: "Non disponible pour ce codec",
-    stereo: "stéréo"
+    stereo: "stéréo",
+    bits: (depth) => `${depth} bits`,
+    channelCount: (channels) => `${channels} canaux`,
+    megabytes: (value) => `${value} Mo`
   },
   disclaimer:
     "Nyquist rapporte ce qu'il peut mesurer et le dit clairement quand ce n'est pas suffisant. Le verdict de transcodage repose surtout sur la forme de la pente spectrale, qui ne peut pas détecter un encodage transparent comme LAME V0 ou AAC 256 — un résultat propre n'est pas une preuve de provenance.",
@@ -256,6 +305,7 @@ const en: Dict = {
     switchTheme: "Switch theme",
     switchLang: "Switch the app to French"
   },
+  dialogs: { audioFiles: "Audio files", jsonFiles: "JSON files" },
   dropzone: {
     title: "Drop an audio file here",
     subtitle: "FLAC, ALAC, WAV, MP3, AAC or OGG. Nothing leaves your machine.",
@@ -281,6 +331,10 @@ const en: Dict = {
     },
     confidence: "confidence"
   },
+  // The backend authors these in English already. Handing its own prose straight back keeps
+  // the app, `nyquist-cli` and an exported report word-for-word identical, and leaves the
+  // wording with a single owner: `IndicatorDetail::english` in transcode_detect.rs.
+  indicator: (i) => i.message,
   findings: {
     checksumMismatchTitle: "Checksum mismatch",
     checksumMismatchDetail:
@@ -349,7 +403,10 @@ const en: Dict = {
     integrityMismatch: "Checksum mismatch",
     integrityNoChecksum: "No checksum stored",
     integrityUnavailable: "Not available for this codec",
-    stereo: "stereo"
+    stereo: "stereo",
+    bits: (depth) => `${depth}-bit`,
+    channelCount: (channels) => `${channels}ch`,
+    megabytes: (value) => `${value} MB`
   },
   disclaimer:
     "Nyquist reports what it can measure and says so when that is not enough. The transcode verdict rests mainly on the shape of the spectral rolloff, which cannot see a transparent encode such as LAME V0 or AAC 256 — a clean result is not proof of provenance.",
