@@ -111,7 +111,9 @@
   async function pickAndAnalyze() {
     const path = await open({
       multiple: false,
-      filters: [{ name: "Audio", extensions: ["flac", "mp3", "m4a", "aac", "alac", "wav", "ogg"] }]
+      filters: [
+        { name: t().dialogs.audioFiles, extensions: ["flac", "mp3", "m4a", "aac", "alac", "wav", "ogg"] }
+      ]
     });
     if (!path || Array.isArray(path)) return;
     analyze(path);
@@ -146,7 +148,7 @@
     if (!result) return;
     const path = await save({
       defaultPath: `${result.file_info.filename}.report.json`,
-      filters: [{ name: "JSON", extensions: ["json"] }]
+      filters: [{ name: t().dialogs.jsonFiles, extensions: ["json"] }]
     });
     if (!path) return;
     await exportReport(path, JSON.stringify(result, null, 2));
@@ -326,8 +328,8 @@
           </div>
         </div>
         <ul class="evidence">
-          {#each ta.indicators as indicator (indicator)}
-            <li>{indicator}</li>
+          {#each ta.indicators as indicator (indicator.code)}
+            <li>{T.indicator(indicator)}</li>
           {/each}
         </ul>
       </section>
@@ -352,8 +354,8 @@
           <span class="chips">
             <span class="chip">{fi.codec.toUpperCase()}</span>
             <span class="chip">{fmtHz(fi.sample_rate_hz)}</span>
-            {#if fi.bit_depth}<span class="chip">{fi.bit_depth}-bit</span>{/if}
-            <span class="chip">{fi.channels === 2 ? T.file2.stereo : `${fi.channels}ch`}</span>
+            {#if fi.bit_depth}<span class="chip">{T.file2.bits(fi.bit_depth)}</span>{/if}
+            <span class="chip">{fi.channels === 2 ? T.file2.stereo : T.file2.channelCount(fi.channels)}</span>
             <span class="chip">{fmtDuration(fi.duration_seconds)}</span>
           </span>
         </div>
@@ -497,10 +499,10 @@
           <div><dt>{T.file2.codec}</dt><dd>{fi.codec}</dd></div>
           <div><dt>{T.file2.sampleRate}</dt><dd>{fmtHz(fi.sample_rate_hz)}</dd></div>
           <div><dt>{T.file2.nyquist}</dt><dd>{fmtHz(fi.nyquist_hz)}</dd></div>
-          <div><dt>{T.file2.bitDepth}</dt><dd>{fi.bit_depth ? `${fi.bit_depth}-bit` : "—"}</dd></div>
+          <div><dt>{T.file2.bitDepth}</dt><dd>{fi.bit_depth ? T.file2.bits(fi.bit_depth) : "—"}</dd></div>
           <div><dt>{T.file2.channels}</dt><dd>{fi.channels}</dd></div>
           <div><dt>{T.file2.duration}</dt><dd>{fmtDuration(fi.duration_seconds)}</dd></div>
-          <div><dt>{T.file2.size}</dt><dd>{fmt(fi.file_size_bytes / 1_000_000, 1)} MB</dd></div>
+          <div><dt>{T.file2.size}</dt><dd>{T.file2.megabytes(fmt(fi.file_size_bytes / 1_000_000, 1))}</dd></div>
           <div><dt>{T.file2.avgBitrate}</dt><dd>{fi.bitrate_kbps ? `${fmt(fi.bitrate_kbps, 0)} kbps` : "—"}</dd></div>
           <div><dt>{T.file2.samples}</dt><dd>{fmtCount(fi.sample_count)}</dd></div>
           <div>

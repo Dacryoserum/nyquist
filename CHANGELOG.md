@@ -6,6 +6,28 @@ releases start shipping.
 
 ## [Unreleased]
 
+### Corrigé
+
+- **La liste d'indices du verdict restait en anglais.** C'est le texte le plus lu de
+  l'application — la justification affichée sous le verdict — et il était écrit en dur dans
+  `transcode_detect.rs`, donc hors de portée du catalogue de traduction ajouté en 0.2.0 :
+  une interface française annonçait « Probablement transcodé » puis expliquait pourquoi en
+  anglais. Le backend émet désormais chaque indice sous forme de code plus ses mesures, et
+  l'interface recompose la phrase dans la langue affichée. Le `nyquist-cli` et les rapports
+  JSON exportés gardent la prose anglaise mot pour mot : un rapport se lit et se compare de
+  la même façon quelle que soit la langue dans laquelle il a été produit.
+- Traduits également : les libellés de filtre des fenêtres système « ouvrir » et
+  « enregistrer », la profondeur de bits (« 24 bits » et non « 24-bit »), le nombre de canaux
+  et l'unité de taille de fichier (« Mo » et non « MB »).
+
+### Modifié
+
+- **Contrat IPC (rupture)** : `transcode_assessment.indicators` était un tableau de chaînes,
+  c'est maintenant un tableau d'objets `{ message, code, …mesures }`. Les scripts qui lisent
+  la sortie `--json` du CLI doivent utiliser `.message` là où ils lisaient la chaîne
+  directement. Un nouvel indice ajouté côté Rust sans sa traduction fait désormais échouer
+  `npm run check`, plutôt que d'atteindre silencieusement l'interface en anglais.
+
 ## [0.2.0] - 2026-08-20
 
 First tagged release. Everything below predates a public version number — see
