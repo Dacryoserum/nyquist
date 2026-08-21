@@ -9,6 +9,7 @@ pub mod metadata;
 pub mod sample_rate;
 pub mod signal_analysis;
 pub mod spectral;
+pub mod stereo;
 pub mod tags;
 pub mod transcode_detect;
 

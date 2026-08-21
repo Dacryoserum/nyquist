@@ -149,10 +149,29 @@ fn print_human_readable(r: &AnalysisResult) {
         );
     }
     println!(
-        "  Spectral cutoff:   {:.1} kHz (rolloff {:.0} dB/kHz)",
+        "  Spectral cutoff:   {:.1} kHz (rolloff {:.0} dB/kHz{})",
         spa.spectral_cutoff_hz / 1000.0,
-        spa.rolloff_steepness_db_per_khz
+        spa.rolloff_steepness_db_per_khz,
+        spa.stopband_depth_db.map(|db| format!(", stopband {db:.0} dB down")).unwrap_or_default()
     );
+    // Reported, not scored — see spectral.rs on why cutoff stability does not separate a
+    // codec's lowpass from a mastering one.
+    println!("  Cutoff stability:  ±{:.0} Hz over the track", spa.cutoff_stability_hz);
+    if let Some(st) = &r.stereo_analysis {
+        let flag = if st.dual_mono {
+            " ⚠ dual mono (channels are bit-identical)"
+        } else if st.mono_compatibility_risk {
+            " ⚠ negative correlation — will cancel when summed to mono"
+        } else if st.effectively_mono {
+            " (negligible stereo width)"
+        } else {
+            ""
+        };
+        println!(
+            "  Stereo image:      correlation {:.2}, side/mid {:.1} dB{}",
+            st.correlation, st.side_to_mid_db, flag
+        );
+    }
     println!("  Verdict:           {:?} (confidence {:.0}%)", ta.verdict, ta.confidence_score * 100.0);
     for indicator in &ta.indicators {
         // `message` rather than the structured detail beside it: the CLI is English-only by

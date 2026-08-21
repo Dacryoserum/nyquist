@@ -56,6 +56,37 @@ export interface SpectrogramData {
   intensity_base64: string;
 }
 
+/** Steady-state level of one named frequency band, relative to the loudest band in the
+ * same file (so always ≤ 0). Mirrors `BandLevel` in spectral.rs. */
+export interface BandLevel {
+  low_hz: number;
+  /** null for the band that runs to Nyquist. */
+  high_hz: number | null;
+  level_db: number;
+}
+
+/** Side/mid energy for one band. Mirrors `BandStereo` in stereo.rs. */
+export interface BandStereo {
+  name: string;
+  low_hz: number;
+  high_hz: number | null;
+  side_to_mid_db: number;
+}
+
+/** How the two channels relate. Mirrors `StereoAnalysis` in stereo.rs — reported
+ * information only, deliberately not an input to the transcode verdict. */
+export interface StereoAnalysis {
+  /** -1..=1. 1 is identical channels, 0 unrelated, negative means out of phase. */
+  correlation: number;
+  side_to_mid_db: number;
+  /** Channels are bit-identical: mono content in a stereo container. Exact, not a threshold. */
+  dual_mono: boolean;
+  effectively_mono: boolean;
+  /** Negative correlation — summing to mono will cancel content, not just narrow it. */
+  mono_compatibility_risk: boolean;
+  per_band: BandStereo[];
+}
+
 export interface SpectralAnalysis {
   /** Where content stops: the lowpass edge if there is one, otherwise Nyquist. Raw
    * measurement, not a transcode verdict — see spectral.rs module docs. */
@@ -66,6 +97,13 @@ export interface SpectralAnalysis {
   encoder_edge_hz: number | null;
   /** Same length/time alignment as spectrogram.time_bin_count. */
   cutoff_over_time_hz: number[];
+  /** Standard deviation of cutoff_over_time_hz, in Hz. Reported, never scored: a mastering
+   * lowpass is as fixed as a codec's, so stability does not separate them — see
+   * spectral.rs. */
+  cutoff_stability_hz: number;
+  band_levels_db: BandLevel[];
+  /** How far the stopband sits below the passband, in dB. null when no edge was found. */
+  stopband_depth_db: number | null;
   spectrogram: SpectrogramData;
 }
 
@@ -145,6 +183,8 @@ export interface AnalysisResult {
   encoder_tag_matches: EncoderTagMatch[];
   bit_depth_analysis: BitDepthAnalysis;
   sample_rate_analysis: SampleRateAnalysis;
+  /** null for anything that is not exactly two channels. */
+  stereo_analysis: StereoAnalysis | null;
 }
 
 export function analyzeFile(path: string): Promise<AnalysisResult> {
