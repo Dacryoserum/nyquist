@@ -2,6 +2,9 @@
  * wrap with `<svg viewBox="0 0 24 24">` at the call site. No icon library dependency. */
 export const icons = {
   disc: `<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="2.5"/>`,
+  plus: `<path d="M12 5v14"/><path d="M5 12h14"/>`,
+  close: `<path d="M6 6l12 12"/><path d="M18 6L6 18"/>`,
+  compare: `<path d="M12 4v16"/><path d="M4 8h5"/><path d="M4 12h5"/><path d="M15 8h5"/><path d="M15 16h5"/>`,
   activity: `<path d="M3 12h4l2 7 4-14 2 7h6"/>`,
   layers: `<path d="M12 4l8 4-8 4-8-4 8-4z"/><path d="M4 12l8 4 8-4"/><path d="M4 16l8 4 8-4"/>`,
   stereo: `<circle cx="8" cy="12" r="4"/><circle cx="16" cy="12" r="4"/>`,

@@ -22,6 +22,16 @@ releases start shipping.
   l'interface et dessiné tel quel : un fichier sans perte donne un relief bas et irrégulier,
   un encodeur AAC un plancher plat surmonté d'un pic unique. La preuve est lisible sans
   qu'on ait à expliquer un seuil.
+- **Comparaison de deux fichiers.** Un « + » discret dans la barre du haut ouvre un second
+  fichier ; les deux verdicts, un tableau de mesures aligné et les deux spectrogrammes se
+  lisent côte à côte. Là où « mieux » est sans ambiguïté (bande passante, plage dynamique,
+  écrêtage, grille MDCT), le côté qui mène est signalé — ailleurs les valeurs sont posées
+  côte à côte sans arbitrage, faute de base pour pondérer un spectre plus large contre un
+  master plus fort.
+- **Choix de la palette du spectrogramme** : inferno (défaut), viridis, glace, monochrome.
+  Quatre pastilles sous la légende, persistées localement. Les quatre sont perceptuellement
+  ordonnées — la clarté croît avec l'intensité — pour que l'image ne fabrique pas de
+  contours absents des données.
 - **Confiance affinée sur les fichiers authentiques.** Deux éléments de preuve *positive*
   s'ajoutent désormais, chacun visible dans la liste d'indices : un balayage de grille propre
   (qui écarte l'AAC) et du contenu au-dessus du plafond de 22,05 kHz d'une source à la
@@ -29,6 +39,10 @@ releases start shipping.
   petits (+0,05 chacun, plafond 0,70) : le point aveugle MP3 reste ouvert. Le bonus hi-res
   exige que le fichier occupe réellement sa bande passante déclarée, sinon la bande de
   transition d'un rééchantillonneur le déclencherait sur un fichier issu d'un CD.
+
+### Corrigé
+
+- La légende du spectrogramme (« Quiet »/« Loud ») était restée en anglais.
 
 
 ## [0.3.0] - 2026-08-21

@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import type { SpectrogramData } from "$lib/api";
-  import { inferno } from "$lib/colormap";
+  import { COLORMAP_NAMES, colormap, colormapState, gradientCss, setColormap } from "$lib/colormap.svelte";
   import { t } from "$lib/i18n.svelte";
 
   const T = $derived(t());
@@ -11,13 +11,17 @@
     spectralCutoffHz,
     cutoffOverTimeHz,
     currentTimeSeconds = 0,
-    onSeek
+    onSeek,
+    showPalette = true
   }: {
     data: SpectrogramData;
     spectralCutoffHz: number;
     cutoffOverTimeHz?: number[];
     currentTimeSeconds?: number;
     onSeek?: (seconds: number) => void;
+    /** The palette is a single global setting, so the picker is shown once. Comparison view
+     * renders two spectrograms and turns it off on both. */
+    showPalette?: boolean;
   } = $props();
 
   let canvas: HTMLCanvasElement;
@@ -75,7 +79,7 @@
     for (let t = 0; t < tCount; t++) {
       for (let f = 0; f < fCount; f++) {
         const value = intensity[t * fCount + f] / 255;
-        const [r, g, b] = inferno(value);
+        const [r, g, b] = colormap(value);
         // Canvas y=0 is the top; frequency should increase upward, so flip the row.
         const y = fCount - 1 - f;
         const idx = (y * tCount + t) * 4;
@@ -91,6 +95,9 @@
 
   onMount(draw);
   $effect(() => {
+    // `colormapState.current` is read here on purpose, not used: reading a rune inside an
+    // effect is what subscribes the effect to it, so switching palette repaints the canvas.
+    colormapState.current;
     if (canvas && data) draw();
   });
 
@@ -167,9 +174,30 @@
     {/each}
   </div>
   <div class="legend">
-    <span class="legend-label">Quiet</span>
-    <div class="legend-bar"></div>
-    <span class="legend-label">Loud</span>
+    <span class="legend-label">{T.spectrogram.quiet}</span>
+    <div class="legend-bar" style:background={gradientCss()}></div>
+    <span class="legend-label">{T.spectrogram.loud}</span>
+    <!-- Palette picker. Four swatches rather than a dropdown: the choice is entirely
+         visual, so showing the options themselves is both smaller and more direct than
+         naming them. Sits at the end of the legend because that is already the row about
+         how the picture is coloured. -->
+    {#if showPalette}
+      <div class="palette" role="radiogroup" aria-label={T.spectrogram.palette}>
+        {#each COLORMAP_NAMES as name (name)}
+          <button
+            type="button"
+            class="swatch"
+            class:active={colormapState.current === name}
+            style:background={gradientCss(name)}
+            role="radio"
+            aria-checked={colormapState.current === name}
+            aria-label={T.spectrogram.paletteName(name)}
+            title={T.spectrogram.paletteName(name)}
+            onclick={() => setColormap(name)}
+          ></button>
+        {/each}
+      </div>
+    {/if}
   </div>
 </div>
 
@@ -289,14 +317,46 @@
     max-width: 260px;
     height: 6px;
     border-radius: 2px;
-    background: linear-gradient(
-      90deg,
-      rgb(0, 0, 4) 0%,
-      rgb(87, 16, 110) 25%,
-      rgb(188, 55, 84) 50%,
-      rgb(249, 142, 9) 75%,
-      rgb(252, 255, 164) 100%
-    );
+    /* Gradient comes from the selected colormap, applied inline. */
+  }
+
+  .palette {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+  }
+
+  /* Deliberately small and unlabelled: this is a preference, not a reading, and it should
+     not compete with the spectrogram it sits under. Each swatch *is* its own preview. */
+  .swatch {
+    width: 22px;
+    height: 10px;
+    padding: 0;
+    border: 1px solid transparent;
+    border-radius: 2px;
+    cursor: pointer;
+    opacity: 0.5;
+    transition: opacity 0.15s ease, border-color 0.15s ease;
+  }
+
+  .swatch:hover {
+    opacity: 0.85;
+  }
+
+  .swatch.active {
+    opacity: 1;
+    border-color: var(--ink-low);
+  }
+
+  .swatch:focus-visible {
+    outline: 1px solid var(--ink-mid);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .swatch {
+      transition: none;
+    }
   }
 
   .legend-label {
