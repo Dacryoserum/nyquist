@@ -12,6 +12,7 @@ use serde::Serialize;
 use crate::bit_depth::{self, BitDepthAnalysis};
 use crate::decode;
 use crate::dynamic_range::{self, DynamicRangeResult};
+use crate::mdct_grid::{self, MdctGridAnalysis};
 use crate::metadata::{self, FileInfo};
 use crate::sample_rate::{self, SampleRateAnalysis};
 use crate::signal_analysis::{self, SignalAnalysis};
@@ -38,6 +39,9 @@ pub struct AnalysisResult {
     /// `None` for anything that is not exactly two channels. Reported information only —
     /// see stereo.rs on why the stereo image does *not* feed the transcode verdict.
     pub stereo_analysis: Option<StereoAnalysis>,
+    /// AAC encoder frame-grid alignment. Unlike the stereo image, this one *does* feed the
+    /// verdict — see mdct_grid.rs.
+    pub mdct_grid: MdctGridAnalysis,
 }
 
 /// Wall-clock cost of each pipeline stage. Deliberately **not** part of
@@ -52,6 +56,7 @@ pub struct StageTimings {
     pub spectral: Duration,
     pub bit_depth: Duration,
     pub stereo: Duration,
+    pub mdct_grid: Duration,
     pub total: Duration,
 }
 
@@ -108,9 +113,18 @@ pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings
                             (out, stage.elapsed())
                         },
                         || {
-                            let stage = Instant::now();
-                            let out = stereo::analyze_stereo(&decoded);
-                            (out, stage.elapsed())
+                            rayon::join(
+                                || {
+                                    let stage = Instant::now();
+                                    let out = stereo::analyze_stereo(&decoded);
+                                    (out, stage.elapsed())
+                                },
+                                || {
+                                    let stage = Instant::now();
+                                    let out = mdct_grid::analyze_mdct_grid(&decoded);
+                                    (out, stage.elapsed())
+                                },
+                            )
                         },
                     )
                 },
@@ -121,13 +135,15 @@ pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings
     let (signal_analysis, signal_elapsed) = signal_analysis;
     let (dynamic_range, dr_elapsed) = dynamic_range;
     let (spectral_analysis, spectral_elapsed) = spectral_analysis;
-    let ((bit_depth_analysis, bit_depth_elapsed), (stereo_analysis, stereo_elapsed)) = bit_depth_analysis;
+    let ((bit_depth_analysis, bit_depth_elapsed), ((stereo_analysis, stereo_elapsed), (mdct_grid, mdct_elapsed))) =
+        bit_depth_analysis;
 
     timings.signal = signal_elapsed;
     timings.dynamic_range = dr_elapsed;
     timings.spectral = spectral_elapsed;
     timings.bit_depth = bit_depth_elapsed;
     timings.stereo = stereo_elapsed;
+    timings.mdct_grid = mdct_elapsed;
 
     let signal_analysis = signal_analysis?;
     let spectral_analysis = spectral_analysis?;
@@ -135,6 +151,7 @@ pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings
         &spectral_analysis,
         file_info.nyquist_hz as f64,
         &decoded.encoder_tag_matches,
+        &mdct_grid,
     );
     let sample_rate_analysis = sample_rate::analyze_sample_rate(
         file_info.sample_rate_hz,
@@ -154,6 +171,7 @@ pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings
             bit_depth_analysis,
             sample_rate_analysis,
             stereo_analysis,
+            mdct_grid,
         },
         timings,
     ))

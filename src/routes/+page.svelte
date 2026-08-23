@@ -11,7 +11,8 @@
     type Verdict
   } from "$lib/api";
   import Icon from "$lib/components/Icon.svelte";
-  import Meter from "$lib/components/Meter.svelte";
+  import MdctGrid from "$lib/components/MdctGrid.svelte";
+import Meter from "$lib/components/Meter.svelte";
   import Spectrogram from "$lib/components/Spectrogram.svelte";
   import ThinkingOrb from "$lib/components/ThinkingOrb.svelte";
   import type { IconName } from "$lib/icons";
@@ -398,6 +399,11 @@
           </div>
         </div>
         <p class="note">{T.spectrum.note}</p>
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">{T.mdct.title}</h2>
+        <MdctGrid grid={result.mdct_grid} />
       </section>
 
       <div class="metric-columns">

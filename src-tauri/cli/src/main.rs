@@ -34,12 +34,13 @@ fn main() -> ExitCode {
                     let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
                     eprintln!(
                         "{path}: decode {:.0}ms | signal {:.0}ms | DR14 {:.0}ms | spectral \
-                         {:.0}ms | bit-depth {:.0}ms | total {:.0}ms",
+                         {:.0}ms | bit-depth {:.0}ms | mdct {:.0}ms | total {:.0}ms",
                         ms(timings.decode),
                         ms(timings.signal),
                         ms(timings.dynamic_range),
                         ms(timings.spectral),
                         ms(timings.bit_depth),
+                        ms(timings.mdct_grid),
                         ms(timings.total)
                     );
                 }
@@ -170,6 +171,17 @@ fn print_human_readable(r: &AnalysisResult) {
         println!(
             "  Stereo image:      correlation {:.2}, side/mid {:.1} dB{}",
             st.correlation, st.side_to_mid_db, flag
+        );
+    }
+    let grid = &r.mdct_grid;
+    if grid.analyzed {
+        println!(
+            "  MDCT grid:         z={:.1} at offset {} (zeroed {:.1}% vs {:.1}% baseline){}",
+            grid.z_score,
+            grid.frame_offset,
+            grid.zero_fraction_at_offset * 100.0,
+            grid.zero_fraction_baseline * 100.0,
+            if grid.grid_detected { " ⚠ AAC encoder grid" } else { "" }
         );
     }
     println!("  Verdict:           {:?} (confidence {:.0}%)", ta.verdict, ta.confidence_score * 100.0);

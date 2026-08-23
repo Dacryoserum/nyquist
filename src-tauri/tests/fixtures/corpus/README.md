@@ -48,8 +48,8 @@ corpus generation — see git history / regenerate and re-measure if you doubt t
 |---|---|---|---|
 | `transcoded_mp3_128_44k.flac` | LAME MP3 128kbps CBR | **~16kHz** — sharp, obvious roll-off | Easy — textbook LAME 128 lowpass |
 | `transcoded_mp3_320_44k.flac` | LAME MP3 320kbps CBR | **~20.5kHz** — clear but subtler roll-off | Moderate |
-| `transcoded_mp3_v0_44k.flac` | LAME MP3 VBR V0 (~245kbps) | **No detectable cutoff** — spectrum indistinguishable from `authentic_44k_noise` by this method | Hard — LAME's "transparent" preset doesn't lowpass |
-| `transcoded_aac_256_44k.flac` | AAC 256kbps (Apple AudioToolbox) | **No detectable cutoff** — same as above | Hard — matches a real iTunes/Apple Music-sourced fake-lossless file |
+| `transcoded_mp3_v0_44k.flac` | LAME MP3 VBR V0 (~245kbps) | **No detectable cutoff** — spectrum indistinguishable from `authentic_44k_noise` by this method | **Still uncaught.** LAME's "transparent" preset doesn't lowpass, and its hybrid filterbank defeats the MDCT grid test |
+| `transcoded_aac_256_44k.flac` | AAC 256kbps (Apple AudioToolbox) | **No detectable cutoff** spectrally — **caught by the MDCT grid** at z = 215 | Was the hardest case; the grid sweep closes it |
 
 **This split is intentional, not a fixture bug.** `mp3_v0` and `aac_256` exist specifically
 to prove that spectral-cutoff detection alone cannot catch every transcode — see the spec's
@@ -58,11 +58,11 @@ scoring needs indicators beyond raw cutoff frequency (e.g. quantization noise fl
 any chance on these two; a detector that only checks `cutoff_hz` should score them
 "indéterminé," never a confident "authentic."
 
-> **The current detector does not meet that bar, and the fixtures below prove it.** These
-> four files come out `ProbablyAuthentic` at 60% — the tool vouching for a transcode, not
-> merely failing to catch one. Four independent approaches were prototyped against this
-> corpus to close the gap; the section at the end of this file records what each measured
-> and why none of them shipped.
+> **Half of this is now covered.** `mdct_grid.rs` catches every AAC case here by reading the
+> encoder's MDCT quantization grid rather than the spectral envelope — see the table at the
+> end of this file. `transcoded_mp3_v0_44k.flac` still comes out `ProbablyAuthentic`, which
+> is the tool vouching for a transcode rather than merely missing it, and MP3's hybrid
+> filterbank cannot be inverted the same way.
 
 ## Non-stationary, true-stereo material
 

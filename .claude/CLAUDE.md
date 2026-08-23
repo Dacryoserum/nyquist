@@ -34,17 +34,22 @@ tag corroborante, ≤0.8 spectral seul, ≤0.6 authentique). Cross-validé contr
 ffmpeg indépendantes et, ponctuellement hors corpus versionné, contre de vrais FLACs
 commerciaux retranscodés (a révélé que la *position* seule du cutoff est trompeuse sur de la
 musique réelle — voir `.claude/CONTEXT.md`). Rapport FP/FN sur le corpus
-(`tests/corpus_smoke.rs`) : **20 fixtures, 0 faux positif, 0 faux négatif inattendu, 5
+(`tests/corpus_smoke.rs`) : **20 fixtures, 0 faux positif, 0 faux négatif inattendu, 2
 échecs documentés**.
 
-⚠️ **Le point aveugle n'est pas un simple raté : c'est une affirmation fausse.** LAME V0 et
-AAC 256 ne coupent pas, donc ils sortent en « probablement authentique » à 60 % — l'outil
-cautionne le faux au lieu de dire « je ne sais pas ». L'AAC 128 s'échappe aussi sur du
-matériau non-stationnaire (27 dB/kHz, sous le seuil de 40) alors qu'il est attrapé sans
-peine sur du bruit plat : ce qui décide, c'est le matériau, pas le débit. Quatre pistes ont
-été prototypées pour combler ça (trous spectraux, grille de trames, stabilité de coupure,
-stéréo joint) — **aucune ne sépare un encodage transparent d'un lossless**, et l'une accuse
-un piano « in the box » plus fort qu'un vrai transcodage. Mesures consignées dans
+**Le point aveugle est à moitié fermé.** `mdct_grid.rs` détecte la grille de quantification
+d'un encodeur AAC en ré-analysant le signal décodé au décalage de trame exact du codec (la
+MDCT est inversible par TDAC, donc on retrouve les coefficients annulés). Test structurel,
+indépendant de l'enveloppe spectrale : il voit les encodages transparents. Corpus : 12
+authentiques à z ≤ 4,7 contre 79/132/215 pour les trois AAC, tous à l'offset 960.
+
+⚠️ **Le MP3 reste ouvert, et ne peut pas être couvert de la même façon** — banc de filtres
+hybride (polyphase 32 bandes + MDCT 18 par bande), qu'aucune MDCT simple n'inverse. LAME V0
+sort donc toujours en « probablement authentique » : l'outil cautionne le faux. Comme le MP3
+est au moins aussi répandu que l'AAC comme source de faux lossless, l'essentiel du risque
+pratique subsiste. Trois autres pistes ont été prototypées et rejetées (trous spectraux —
+accuse un piano « in the box » plus fort qu'un vrai transcodage ; grille de trames en
+domaine temporel — aucun signal ; stéréo joint — aucune séparation). Mesures consignées dans
 `tests/fixtures/corpus/README.md` : les relire avant de retenter.
 
 **Le bit-depth padding ("faux hi-res") est un problème séparé, avec sa propre méthode** —
@@ -86,6 +91,7 @@ nyquist/
 │   │   ├── dynamic_range.rs    # ✅ DR14 (Pleasurize Music Foundation), voir module docs
 │   │   ├── bit_depth.rs        # ✅ Détection bit-depth padding ("faux hi-res")
 │   │   ├── spectral.rs         # ✅ FFT, spectrogramme downsamplé, cutoff + pente + dans le temps
+│   │   ├── mdct_grid.rs        # ✅ Grille de quantification MDCT d'un encodeur AAC (structurel)
 │   │   ├── stereo.rs           # ✅ Corrélation L/R, side/mid global et par bande, dual-mono
 │   │   ├── transcode_detect.rs # ✅ Scoring 3 états, voir la skill dédiée + module docs
 │   │   └── commands.rs         # ✅ analyze_file, authorize_playback, export_report

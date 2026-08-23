@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use nyquist_lib::bit_depth::analyze_bit_depth;
 use nyquist_lib::decode::decode_file;
+use nyquist_lib::mdct_grid::analyze_mdct_grid;
 use nyquist_lib::metadata::build_file_info;
 use nyquist_lib::sample_rate::analyze_sample_rate;
 use nyquist_lib::signal_analysis::analyze_signal;
@@ -116,7 +117,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: (21_000.0, 22_050.0),
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
-        known_undetectable: true,
+        known_undetectable: false,
     },
     Fixture {
         // False-positive trap: genuinely lossless *tonal* content. A sustained chord's
@@ -241,7 +242,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: (21_000.0, 22_050.0),
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
-        known_undetectable: true,
+        known_undetectable: false,
     },
     Fixture {
         // New information from this material: AAC 128 lowpasses at 18.3 kHz but only at
@@ -255,7 +256,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: (18_000.0, 19_500.0),
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
-        known_undetectable: true,
+        known_undetectable: false,
     },
     // ── False-positive traps on non-stationary material ─────────────────────────────
     Fixture {
@@ -361,7 +362,9 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
             fx.filename
         );
 
-        let assessment = assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches);
+        let grid = analyze_mdct_grid(&decoded);
+        let assessment =
+            assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches, &grid);
         eprintln!(
             "{}: verdict = {:?}, confidence = {:.2}, actually_transcoded = {}",
             fx.filename, assessment.verdict, assessment.confidence_score, fx.is_actually_transcoded
@@ -398,11 +401,12 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
     assert!(false_negatives.is_empty(), "unexpected false negatives: {false_negatives:?}");
     assert_eq!(
         known_misses.len(),
-        5,
-        "expected exactly the 5 documented undetectable cases to miss (LAME V0 and AAC 256 on \
-         stationary noise, plus LAME V0, AAC 256 and AAC 128 on the non-stationary material); \
-         got {known_misses:?} — if this shrinks, the blind spot may be narrowing: update \
-         `known_undetectable` and this assertion; if it grows, something else regressed"
+        2,
+        "expected exactly the 2 remaining undetectable cases to miss — LAME V0 on both the \
+         stationary and the non-stationary material. Every AAC case is now caught by the MDCT \
+         grid sweep (mdct_grid.rs), which cannot invert MP3's hybrid filterbank. Got \
+         {known_misses:?} — if this shrinks further the MP3 side has been solved: update \
+         `known_undetectable` and this assertion; if it grows, something regressed"
     );
 }
 
@@ -469,8 +473,9 @@ fn a_pure_sine_is_never_reported_as_transcoded() {
     let decoded = decode_file(&path).expect("calibration sine should decode");
     let file_info = build_file_info(&path, &decoded).expect("metadata should build");
     let spectral = analyze_spectrum(&decoded).expect("spectral analysis should succeed");
+    let grid = analyze_mdct_grid(&decoded);
     let assessment =
-        assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches);
+        assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches, &grid);
 
     assert_eq!(
         spectral.rolloff_steepness_db_per_khz, 0.0,

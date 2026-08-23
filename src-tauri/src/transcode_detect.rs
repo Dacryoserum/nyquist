@@ -24,41 +24,43 @@
 //! steepness as the primary gate for a "transcoded" verdict, and cutoff position only to
 //! describe *where* an already-confirmed cutoff sits, never as independent evidence.
 //!
-//! ## Known blind spot
+//! ## Known blind spot, and what closed half of it
 //!
-//! A transparent lossy encode (LAME VBR V0, AAC ≥256kbps) does not reliably lowpass at
-//! all — `transcoded_mp3_v0_44k.flac` and `transcoded_aac_256_44k.flac` in the corpus
-//! measure indistinguishable from genuinely lossless noise by this method. This module
-//! cannot catch that case; confidence in any "probably authentic" verdict is capped
-//! accordingly.
+//! A transparent lossy encode does not reliably lowpass at all, so the rolloff measurement
+//! above cannot see one. That used to mean LAME V0 *and* AAC 256 came out
+//! `ProbablyAuthentic` — the tool vouching for a transcode rather than merely missing it,
+//! which is the worst thing it can do.
 //!
-//! Two things about that blind spot are worth stating precisely, because both were
-//! understated until the corpus grew material that could show them.
+//! **The AAC half is now covered**, by `mdct_grid.rs`, which reads a different property
+//! entirely: an AAC encoder quantizes on a 1024-point MDCT, and re-analysing the decoded
+//! signal at the encoder's own frame alignment recovers the coefficients it zeroed. That is
+//! structural, not statistical, so it survives a transparent encode. Across the corpus it
+//! separates by a factor of eleven — 12 authentic fixtures at z ≤ 4.7, three AAC transcodes
+//! at 79, 132 and 215, all three agreeing on frame offset 960.
 //!
-//! **It is wider than the bitrate suggests.** On non-stationary material, AAC at *128*
-//! kbps also escapes: `transcoded_dynamic_aac_128_44k.flac` lowpasses at 18.3 kHz but only
-//! at 27 dB/kHz, under [`STEEPNESS_TRANSCODE_THRESHOLD`], and lands on `Indeterminate`. The
-//! same encoder on flat noise measures ~106 dB/kHz and is caught easily. What decides it is
-//! the program material, not the bitrate.
+//! **The MP3 half is still open, and cannot be closed the same way.** MP3 uses a hybrid
+//! filterbank — a 32-band polyphase stage feeding an 18-point MDCT per band — which a plain
+//! MDCT does not invert at any size. LAME V0 remains the one case in this corpus that is
+//! transcoded and reads authentic. Since MP3 is at least as common a source of fake-lossless
+//! files as AAC, most of the practical risk survives, and [`GRID_CLEAR_BONUS`] is sized to
+//! say so rather than to celebrate.
 //!
-//! **In this branch the failure is an assertion, not a shrug.** A file with no detectable
-//! edge is reported `ProbablyAuthentic` at [`NO_EDGE_CONFIDENCE`], so a transparent
-//! transcode is not merely missed — it is actively vouched for. `corpus/README.md` has
-//! called for these to score "indéterminé, never a confident authentic" since the corpus was
-//! written, and this module does not yet meet that bar. It is left as-is deliberately rather
-//! than papered over with a lower constant: routing every no-edge file to `Indeterminate`
-//! would make the verdict useless for the genuinely lossless majority, and any number
-//! between the two would be calibrated against nothing but the corpus's own arbitrary
-//! composition.
+//! The blind spot is also wider than bitrate alone suggests. On non-stationary material AAC
+//! at *128* kbps escapes the rolloff test too — 18.3 kHz at only 27 dB/kHz, under
+//! [`STEEPNESS_TRANSCODE_THRESHOLD`] — where the same encoder on flat noise reads
+//! ~106 dB/kHz. What decides is the program material, not the setting. The grid sweep
+//! catches that case regardless, which is exactly the point of having an indicator that does
+//! not read the envelope.
 //!
-//! Four candidate indicators were prototyped against the corpus to close the gap —
-//! spectral holes, the codec frame grid, cutoff stability, and joint-stereo collapse. None
-//! separates a transparent encode from lossless; one of them actively flags legitimate
-//! in-the-box piano harder than it flags a real LAME transcode. The measurements are
-//! recorded in `corpus/README.md` so the next attempt does not repeat them.
+//! Three other candidates were prototyped against the corpus and rejected: spectral holes
+//! (flags a legitimate in-the-box piano harder than a real LAME transcode), the codec frame
+//! grid measured in the time domain (no signal — TDAC overlap smooths it away), and
+//! joint-stereo collapse (no separation at all). Their measurements are recorded in
+//! `corpus/README.md` so the next attempt does not repeat them.
 
 use serde::Serialize;
 
+use crate::mdct_grid::MdctGridAnalysis;
 use crate::spectral::SpectralAnalysis;
 use crate::tags::EncoderTagMatch;
 
@@ -99,6 +101,45 @@ const STEEPNESS_CONFIDENT_THRESHOLD: f64 = 85.0;
 /// That silently made the branch unreachable for real music, whose peak-relative cutoff sits
 /// around 5 kHz, so every genuine lossless file fell through to `Indeterminate` at 30%.
 const NO_EDGE_CONFIDENCE: f64 = 0.6;
+/// Confidence when the MDCT grid fires on top of an already-"transcoded" spectral verdict.
+/// The two are structurally independent — one reads the envelope, the other the coefficient
+/// alignment — so agreement between them is worth more than either alone.
+const GRID_CORROBORATED_CONFIDENCE: f64 = 0.95;
+/// Confidence when the grid is the only evidence. Still high: unlike a tag, this is a
+/// measurement of the audio, and a lossless file landing on a 1024-sample MDCT grid by
+/// chance is not something the corpus shows any sign of (12 authentic fixtures peak at
+/// z = 4.7 against a threshold of 20). Held under 1.0 because the corpus is small and only
+/// covers one AAC encoder.
+const GRID_ONLY_CONFIDENCE: f64 = 0.9;
+/// Added to an "authentic" verdict when the grid sweep ran and found nothing.
+///
+/// Deliberately small. A clean sweep rules out AAC, which is the most common source of
+/// fake-lossless files bought from a store — but it says nothing at all about MP3, and
+/// `mdct_grid.rs` cannot be made to. Since LAME V0 is at least as common in the wild as
+/// AAC 256, most of the blind spot survives, and the number should reflect that rather than
+/// reward the half of the problem that was solved.
+const GRID_CLEAR_BONUS: f64 = 0.05;
+/// Ceiling on a "probably authentic" verdict however much corroboration accumulates. The
+/// verdict still rests on an absence of evidence, and the MP3 blind spot is still open.
+const NO_EDGE_MAX_CONFIDENCE: f64 = 0.7;
+/// Added when content runs above the 22.05 kHz ceiling a CD-sourced lossy encode could
+/// carry. Independent of the grid sweep: no MP3 exists at a sample rate high enough to
+/// reach there, so that whole transcode path is ruled out by measurement rather than by
+/// absence. Small for the same reason as [`GRID_CLEAR_BONUS`] — it narrows the space of
+/// possible lies, it does not prove the file honest.
+const ABOVE_CD_BANDWIDTH_BONUS: f64 = 0.05;
+/// Highest frequency any 44.1 kHz source can carry. Content above this cannot have come
+/// through a CD-rate lossy encode.
+const CD_NYQUIST_HZ: f64 = 22_050.0;
+/// How much of its declared bandwidth a file must actually use before content above
+/// [`CD_NYQUIST_HZ`] counts as evidence of a hi-res source.
+///
+/// Without this the rule backfires on upsampled files. Resampling 44.1 kHz material to
+/// 96 kHz leaves an anti-imaging transition band that the wide bandwidth probe measures at
+/// around 25 kHz — above the CD ceiling, yet produced by a CD-rate source, which is exactly
+/// the inference the bonus is meant to license. Genuine hi-res fills its bandwidth
+/// (ratio ≈ 1.0); the corpus's upsampled fixture sits at 0.52.
+const HI_RES_BANDWIDTH_RATIO: f64 = 0.9;
 /// Lower bound of the scanned range, in kHz, quoted to the user so the claim states its own
 /// scope. Mirrors `spectral::MIN_PLAUSIBLE_ENCODER_CUTOFF_HZ`.
 const MIN_SCANNED_KHZ: f64 = 8.0;
@@ -183,6 +224,13 @@ pub enum IndicatorDetail {
     TransparentEncodeUnseen,
     /// An edge exists but is too gradual to attribute to a codec either way.
     GradualRolloff { cutoff_khz: f64, steepness_db_per_khz: f64 },
+    /// The file's own MDCT coefficients collapse at one specific frame alignment — an AAC
+    /// encoder's grid. Structural evidence, independent of the spectral envelope.
+    MdctGridAligned { z_score: f64, frame_offset: usize, zero_percent: f64, baseline_percent: f64 },
+    /// The grid sweep ran and found no alignment: AAC is ruled out, MP3 is not.
+    MdctGridClear,
+    /// Content runs above the ceiling any CD-rate lossy encode could carry.
+    BandwidthAboveCdCeiling { cutoff_khz: f64 },
 }
 
 impl IndicatorDetail {
@@ -233,6 +281,23 @@ impl IndicatorDetail {
                  measuring indistinguishable from lossless by this method. Confidence is \
                  capped accordingly."
                 .to_string(),
+            Self::MdctGridAligned { z_score, frame_offset, zero_percent, baseline_percent } => format!(
+                "The file's own MDCT coefficients collapse at one specific frame alignment \
+                 (offset {frame_offset}, {z_score:.0} standard deviations above this file's \
+                 own behaviour at every other offset): {zero_percent:.1}% of coefficients \
+                 read as zeroed there against {baseline_percent:.1}% elsewhere. That is an \
+                 AAC encoder's quantization grid. Lossless audio has no such alignment."
+            ),
+            Self::MdctGridClear => "The MDCT grid sweep found no encoder alignment, which \
+                 rules out an AAC source — including the transparent settings a spectral \
+                 measurement cannot see. It says nothing about MP3, whose hybrid filterbank \
+                 this test cannot invert, so the blind spot narrows rather than closes."
+                .to_string(),
+            Self::BandwidthAboveCdCeiling { cutoff_khz } => format!(
+                "Content runs to {cutoff_khz:.1} kHz, above the 22.05 kHz ceiling any \
+                 CD-rate source could carry. This rules out the most common transcode path \
+                 by measurement rather than by absence of evidence."
+            ),
             Self::GradualRolloff { cutoff_khz, steepness_db_per_khz } => format!(
                 "Content stops around {cutoff_khz:.1} kHz, but the transition there is \
                  gradual (~{steepness_db_per_khz:.0} dB/kHz) rather than the near-vertical \
@@ -248,10 +313,70 @@ pub fn assess_transcode_risk(
     spectral: &SpectralAnalysis,
     nyquist_hz: f64,
     encoder_tag_matches: &[EncoderTagMatch],
+    mdct_grid: &MdctGridAnalysis,
 ) -> TranscodeAssessment {
     let mut assessment = assess_from_spectrum(spectral, nyquist_hz);
+    apply_mdct_grid_evidence(&mut assessment, mdct_grid);
     apply_tag_evidence(&mut assessment, encoder_tag_matches);
     assessment
+}
+
+/// The MDCT grid is the only indicator here allowed to overturn a spectral "authentic", and
+/// the asymmetry is deliberate.
+///
+/// `apply_tag_evidence` below refuses to do that, because a tag is a string some unrelated
+/// program wrote once and no tool has checked since. The grid is not a claim about the file,
+/// it is a measurement *of* the file: an alignment at which its own coefficients collapse,
+/// scored against its own behaviour at the other 1023 offsets. When that fires against a
+/// spectrum that found no lowpass, the two are not in conflict — the spectrum found nothing
+/// because a transparent encode leaves nothing there to find, which is exactly the blind
+/// spot this indicator exists to cover.
+///
+/// A clean grid result is *weak* evidence the other way, and is scored as such: it rules out
+/// AAC, which is a real narrowing, but says nothing about LAME. See [`GRID_CLEAR_BONUS`].
+fn apply_mdct_grid_evidence(assessment: &mut TranscodeAssessment, grid: &MdctGridAnalysis) {
+    if !grid.analyzed {
+        return;
+    }
+
+    if grid.grid_detected {
+        assessment.indicators.push(Indicator::new(IndicatorDetail::MdctGridAligned {
+            z_score: grid.z_score,
+            frame_offset: grid.frame_offset,
+            zero_percent: grid.zero_fraction_at_offset * 100.0,
+            baseline_percent: grid.zero_fraction_baseline * 100.0,
+        }));
+        assessment.confidence_score = match assessment.verdict {
+            // Two structurally independent signals agreeing: a lowpass in the envelope and a
+            // frame grid in the coefficients.
+            Verdict::ProbablyTranscoded => {
+                assessment.confidence_score.max(GRID_CORROBORATED_CONFIDENCE)
+            }
+            _ => {
+                // The spectral branch may have attached the transparent-encode caveat, whose
+                // whole point is that confidence in *authenticity* is capped because this
+                // case cannot be seen. It just was seen, so leaving the sentence in would
+                // have the verdict argue against itself. The lowpass measurement itself
+                // stays: it is still true, and it is what explains why the envelope alone
+                // missed this file.
+                assessment
+                    .indicators
+                    .retain(|i| !matches!(i.detail, IndicatorDetail::TransparentEncodeUnseen));
+                assessment.verdict = Verdict::ProbablyTranscoded;
+                GRID_ONLY_CONFIDENCE
+            }
+        };
+        return;
+    }
+
+    // Only worth stating where it changes something: on an "authentic" reading it narrows
+    // the known blind spot, which is the one place the user is being asked to trust an
+    // absence of evidence.
+    if assessment.verdict == Verdict::ProbablyAuthentic {
+        assessment.indicators.push(Indicator::new(IndicatorDetail::MdctGridClear));
+        assessment.confidence_score =
+            (assessment.confidence_score + GRID_CLEAR_BONUS).min(NO_EDGE_MAX_CONFIDENCE);
+    }
 }
 
 /// Tag evidence is asymmetric on purpose: a match is real evidence of a transcode, but no
@@ -334,16 +459,32 @@ fn assess_from_spectrum(spectral: &SpectralAnalysis, nyquist_hz: f64) -> Transco
     // by ~5 kHz while still carrying content to the top — so genuine lossless files all fell
     // through to `Indeterminate`. See `find_spectral_edge`.
     if spectral.encoder_edge_hz.is_none() {
+        let mut indicators = vec![
+            Indicator::new(IndicatorDetail::NoEncoderLowpass {
+                scanned_from_khz: MIN_SCANNED_KHZ,
+                nyquist_khz: nyquist_hz / 1000.0,
+            }),
+            Indicator::new(IndicatorDetail::TransparentEncodeUnseen),
+        ];
+        let mut confidence = NO_EDGE_CONFIDENCE;
+
+        // Content above the CD ceiling cannot have come through a 44.1 kHz lossy encode —
+        // no MP3 exists at a sample rate high enough to reach there. Unlike everything else
+        // in this branch, that is positive evidence rather than an absence of it, so it is
+        // stated separately instead of being folded into the base number.
+        let uses_declared_bandwidth =
+            nyquist_hz > 0.0 && spectral.spectral_cutoff_hz / nyquist_hz >= HI_RES_BANDWIDTH_RATIO;
+        if spectral.spectral_cutoff_hz > CD_NYQUIST_HZ && uses_declared_bandwidth {
+            indicators.push(Indicator::new(IndicatorDetail::BandwidthAboveCdCeiling {
+                cutoff_khz: spectral.spectral_cutoff_hz / 1000.0,
+            }));
+            confidence = (confidence + ABOVE_CD_BANDWIDTH_BONUS).min(NO_EDGE_MAX_CONFIDENCE);
+        }
+
         return TranscodeAssessment {
             verdict: Verdict::ProbablyAuthentic,
-            confidence_score: NO_EDGE_CONFIDENCE,
-            indicators: vec![
-                Indicator::new(IndicatorDetail::NoEncoderLowpass {
-                    scanned_from_khz: MIN_SCANNED_KHZ,
-                    nyquist_khz: nyquist_hz / 1000.0,
-                }),
-                Indicator::new(IndicatorDetail::TransparentEncodeUnseen),
-            ],
+            confidence_score: confidence,
+            indicators,
         };
     }
 
