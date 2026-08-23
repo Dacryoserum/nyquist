@@ -170,6 +170,19 @@ interface Dict {
   disclaimer: string;
   player: { play: string; pause: string; playbackPosition: string; mute: string; unmute: string; volume: string };
   spectrogram: { seekAria: string; canvasAria: string; rawCutoff: (freq: string) => string };
+  mdct: {
+    title: string;
+    detected: string;
+    clear: string;
+    notAnalyzed: string;
+    offset: string;
+    zeroed: string;
+    baseline: string;
+    strength: string;
+    axisOffset: string;
+    chartAria: string;
+    note: string;
+  };
 }
 
 const fr: Dict = {
@@ -230,6 +243,12 @@ const fr: Dict = {
         return "Cela n'exclut pas un encodage avec perte transparent (par ex. LAME V0, AAC 256 kbps) — le corpus du projet montre que ceux-ci se mesurent de façon indiscernable du sans perte par cette méthode. La confiance est plafonnée en conséquence.";
       case "gradual_rolloff":
         return `Le contenu s'arrête autour de ${fmtNumber(i.cutoff_khz, 1)} kHz, mais la transition y est progressive (~${fmtNumber(i.steepness_db_per_khz, 0)} dB/kHz) plutôt que le mur quasi vertical que produit un codec. C'est compatible avec un master volontairement sombre, un report de vinyle ou de bande, ou un encodage avec perte dont cette méthode ne peut pas distinguer le filtre — pas de quoi trancher dans un sens ou dans l'autre.`;
+      case "mdct_grid_aligned":
+        return `Les coefficients MDCT du fichier s'effondrent à un alignement de trame précis (décalage ${i.frame_offset}, ${fmtNumber(i.z_score, 0)} écarts-types au-dessus de ce que fait ce même fichier à tous les autres décalages) : ${fmtNumber(i.zero_percent, 1)} % des coefficients y sont annulés, contre ${fmtNumber(i.baseline_percent, 1)} % ailleurs. C'est la grille de quantification d'un encodeur AAC. De l'audio sans perte n'a aucun alignement de ce genre.`;
+      case "mdct_grid_clear":
+        return "Le balayage de la grille MDCT n'a trouvé aucun alignement d'encodeur, ce qui écarte une source AAC — y compris aux réglages transparents qu'une mesure spectrale ne peut pas voir. Cela ne dit rien du MP3, dont le banc de filtres hybride n'est pas inversible par cette méthode : le point aveugle se rétrécit, il ne se referme pas.";
+      case "bandwidth_above_cd_ceiling":
+        return `Le contenu monte jusqu'à ${fmtNumber(i.cutoff_khz, 1)} kHz, au-dessus du plafond de 22,05 kHz que peut porter n'importe quelle source à la fréquence du CD. Cela écarte le chemin de transcodage le plus courant par la mesure, et non par absence de preuve.`;
     }
   },
   findings: {
@@ -344,6 +363,19 @@ const fr: Dict = {
     seekAria: "Cliquer pour déplacer la lecture",
     canvasAria: "Spectrogramme",
     rawCutoff: (freq) => `coupure brute ~${freq}Hz`
+  },
+  mdct: {
+    title: "Grille MDCT",
+    detected: "Grille d'encodeur AAC détectée",
+    clear: "Aucun alignement d'encodeur",
+    notAnalyzed: "Fichier trop court ou trop calme pour être balayé",
+    offset: "Décalage",
+    zeroed: "Coefficients annulés",
+    baseline: "ailleurs",
+    strength: "Écart",
+    axisOffset: "décalage de trame (échantillons)",
+    chartAria: "Profil du balayage de la grille MDCT",
+    note: "Chaque colonne est un décalage de trame possible ; sa hauteur, la part de coefficients MDCT annulés à ce décalage. Un fichier sans perte se comporte pareil partout — un relief irrégulier et bas. Un encodeur AAC laisse sa grille : un pic unique, à sa position de trame. C'est une propriété structurelle du fichier, indépendante de la forme du spectre, et c'est pourquoi elle voit ce que la pente de coupure ne voit pas. Le MP3 n'est pas couvert : son banc de filtres hybride n'est pas une MDCT simple."
   }
 };
 
@@ -497,6 +529,19 @@ const en: Dict = {
     seekAria: "Click to seek playback position",
     canvasAria: "Spectrogram",
     rawCutoff: (freq) => `raw cutoff ~${freq}Hz`
+  },
+  mdct: {
+    title: "MDCT grid",
+    detected: "AAC encoder grid detected",
+    clear: "No encoder alignment",
+    notAnalyzed: "File too short or too quiet to sweep",
+    offset: "Offset",
+    zeroed: "Coefficients zeroed",
+    baseline: "elsewhere",
+    strength: "Margin",
+    axisOffset: "frame offset (samples)",
+    chartAria: "MDCT grid sweep profile",
+    note: "Each column is a candidate frame offset; its height is the share of MDCT coefficients reading as zeroed there. A lossless file behaves much the same at every offset — a low, uneven ridge. An AAC encoder leaves its grid behind: a single spike, at its own frame position. This is a structural property of the file, independent of the shape of its spectrum, which is why it sees what the rolloff measurement cannot. MP3 is not covered: its hybrid filterbank is not a plain MDCT."
   }
 };
 

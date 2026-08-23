@@ -130,7 +130,16 @@ export type IndicatorDetail =
   | { code: "sharp_rolloff"; steepness_db_per_khz: number; edge_khz: number }
   | { code: "no_encoder_lowpass"; scanned_from_khz: number; nyquist_khz: number }
   | { code: "transparent_encode_unseen" }
-  | { code: "gradual_rolloff"; cutoff_khz: number; steepness_db_per_khz: number };
+  | { code: "gradual_rolloff"; cutoff_khz: number; steepness_db_per_khz: number }
+  | {
+      code: "mdct_grid_aligned";
+      z_score: number;
+      frame_offset: number;
+      zero_percent: number;
+      baseline_percent: number;
+    }
+  | { code: "mdct_grid_clear" }
+  | { code: "bandwidth_above_cd_ceiling"; cutoff_khz: number };
 
 /** A piece of evidence, carrying the backend's English prose *and* the raw observation.
  *
@@ -174,6 +183,28 @@ export interface SampleRateAnalysis {
   sufficient_sample_rate_hz: number | null;
 }
 
+/** AAC encoder frame-grid alignment. Mirrors `MdctGridAnalysis` in mdct_grid.rs.
+ *
+ * Unlike the stereo image, this one *does* feed the verdict: an alignment at which the
+ * file's own MDCT coefficients collapse is an encoder's quantization grid, which lossless
+ * audio has no reason to exhibit. Covers AAC only — MP3's hybrid filterbank is not a plain
+ * MDCT and cannot be inverted this way. */
+export interface MdctGridAnalysis {
+  grid_detected: boolean;
+  /** Robust standard deviations above the file's own median offset. */
+  z_score: number;
+  /** Winning offset in samples, 0..1024. */
+  frame_offset: number;
+  zero_fraction_at_offset: number;
+  zero_fraction_baseline: number;
+  /** false when the file was too short or too quiet to sweep; other fields are then void. */
+  analyzed: boolean;
+  /** One byte per candidate offset (1024 of them), each the zero-fraction there scaled
+   * against the strongest, base64-encoded. Drawn as-is by MdctGrid.svelte: the shape is the
+   * evidence — a low uneven ridge for lossless, a flat floor with one spike for AAC. */
+  sweep_profile_base64: string;
+}
+
 export interface AnalysisResult {
   file_info: FileInfo;
   signal_analysis: SignalAnalysis;
@@ -185,6 +216,7 @@ export interface AnalysisResult {
   sample_rate_analysis: SampleRateAnalysis;
   /** null for anything that is not exactly two channels. */
   stereo_analysis: StereoAnalysis | null;
+  mdct_grid: MdctGridAnalysis;
 }
 
 export function analyzeFile(path: string): Promise<AnalysisResult> {

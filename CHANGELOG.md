@@ -6,6 +6,31 @@ releases start shipping.
 
 ## [Unreleased]
 
+### Ajouté
+
+- **Détection de la grille MDCT — le point aveugle AAC est fermé** (`mdct_grid.rs`). La MDCT
+  est inversible (TDAC) : en ré-analysant le signal décodé avec la taille de fenêtre et le
+  **décalage de trame** exacts d'un encodeur AAC, on retrouve ses propres coefficients
+  quantifiés, dont ceux qu'il a mis à zéro. Un fichier sans perte n'a aucun alignement de ce
+  genre. C'est un test *structurel*, pas statistique : il ne lit pas l'enveloppe spectrale,
+  donc il n'est pas aveugle aux encodages transparents. Sur le corpus : 12 fixtures
+  authentiques à z ≤ 4,7 contre 79, 132 et 215 pour les trois transcodages AAC, tous les
+  trois d'accord sur le décalage 960. Le rapport passe de **5 ratés documentés à 2** — sans
+  aucun faux positif. Le MP3 n'est pas couvert et ne peut pas l'être ainsi : son banc de
+  filtres hybride n'est pas une MDCT simple. LAME V0 reste le point aveugle.
+- **Visualisation de la grille.** Le balayage complet des 1024 décalages est transmis à
+  l'interface et dessiné tel quel : un fichier sans perte donne un relief bas et irrégulier,
+  un encodeur AAC un plancher plat surmonté d'un pic unique. La preuve est lisible sans
+  qu'on ait à expliquer un seuil.
+- **Confiance affinée sur les fichiers authentiques.** Deux éléments de preuve *positive*
+  s'ajoutent désormais, chacun visible dans la liste d'indices : un balayage de grille propre
+  (qui écarte l'AAC) et du contenu au-dessus du plafond de 22,05 kHz d'une source à la
+  fréquence du CD (qui écarte le chemin de transcodage le plus courant). Volontairement
+  petits (+0,05 chacun, plafond 0,70) : le point aveugle MP3 reste ouvert. Le bonus hi-res
+  exige que le fichier occupe réellement sa bande passante déclarée, sinon la bande de
+  transition d'un rééchantillonneur le déclencherait sur un fichier issu d'un CD.
+
+
 ## [0.3.0] - 2026-08-21
 
 ### Ajouté

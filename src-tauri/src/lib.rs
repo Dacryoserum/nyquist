@@ -5,6 +5,7 @@ pub mod analysis;
 pub mod bit_depth;
 pub mod decode;
 pub mod dynamic_range;
+pub mod mdct_grid;
 pub mod metadata;
 pub mod sample_rate;
 pub mod signal_analysis;
