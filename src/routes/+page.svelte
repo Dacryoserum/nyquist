@@ -10,6 +10,7 @@
     type AnalysisResult,
     type Verdict
   } from "$lib/api";
+  import Comparison from "$lib/components/Comparison.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import MdctGrid from "$lib/components/MdctGrid.svelte";
 import Meter from "$lib/components/Meter.svelte";
@@ -17,6 +18,7 @@ import Meter from "$lib/components/Meter.svelte";
   import ThinkingOrb from "$lib/components/ThinkingOrb.svelte";
   import type { IconName } from "$lib/icons";
   import { fmtNumber, initLang, langState, t, toggleLang } from "$lib/i18n.svelte";
+  import { initColormap } from "$lib/colormap.svelte";
 
   let result = $state<AnalysisResult | null>(null);
   let error = $state<string | null>(null);
@@ -24,6 +26,12 @@ import Meter from "$lib/components/Meter.svelte";
   let lastPath = $state<string | null>(null);
   let dragging = $state(false);
   let theme = $state<"light" | "dark">("dark");
+
+  // Second slot for comparison. Playback deliberately stays bound to the primary file:
+  // two unsynchronised players is a worse experience than one, and syncing them is a
+  // different feature.
+  let compareResult = $state<AnalysisResult | null>(null);
+  let compareLoading = $state(false);
 
   let audioEl = $state<HTMLAudioElement | undefined>();
   let audioSrc = $state<string | null>(null);
@@ -46,6 +54,7 @@ import Meter from "$lib/components/Meter.svelte";
     theme = saved === "light" || saved === "dark" ? saved : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
     applyTheme();
     initLang();
+    initColormap();
 
     try {
       const savedVolume = localStorage.getItem("nyquist-volume");
@@ -98,6 +107,7 @@ import Meter from "$lib/components/Meter.svelte";
     currentTime = 0;
     audioSrc = null;
     lastPath = path;
+    compareResult = null;
     try {
       const [analysis] = await Promise.all([analyzeFile(path), authorizePlayback(path)]);
       result = analysis;
@@ -106,6 +116,26 @@ import Meter from "$lib/components/Meter.svelte";
       error = String(e);
     } finally {
       loading = false;
+    }
+  }
+
+  /** Analyzes a second file into the comparison slot, leaving the first one untouched. */
+  async function pickAndCompare() {
+    const path = await open({
+      multiple: false,
+      filters: [
+        { name: t().dialogs.audioFiles, extensions: ["flac", "mp3", "m4a", "aac", "alac", "wav", "ogg"] }
+      ]
+    });
+    if (!path || Array.isArray(path)) return;
+    compareLoading = true;
+    error = null;
+    try {
+      compareResult = await analyzeFile(path);
+    } catch (e) {
+      error = String(e);
+    } finally {
+      compareLoading = false;
     }
   }
 
@@ -267,6 +297,17 @@ import Meter from "$lib/components/Meter.svelte";
         <button class="ghost" onclick={handleExport}>
           <Icon name="download" size={14} /> {T.actions.exportJson}
         </button>
+        <!-- Comparison is opt-in and rare, so it gets the same quiet ghost chrome as the
+             other topbar actions rather than a primary button competing with the verdict. -->
+        <button
+          class="ghost icon-only"
+          onclick={pickAndCompare}
+          disabled={compareLoading}
+          aria-label={T.compare.add}
+          title={T.compare.add}
+        >
+          <Icon name={compareLoading ? "refresh" : "plus"} size={15} />
+        </button>
       {/if}
       <!-- Discreet by design: two-letter code naming the *other* language, matching the
            same small mono ghost-button chrome as the theme toggle rather than a flag or a
@@ -305,7 +346,15 @@ import Meter from "$lib/components/Meter.svelte";
       <p class="error standalone" role="alert">{error}</p>
     {/if}
 
-    {#if result}
+    {#if result && compareResult}
+      <Comparison a={result} b={compareResult} onClear={() => (compareResult = null)} />
+    {/if}
+
+    {#if compareLoading}
+      <p class="compare-loading" aria-live="polite">{T.compare.loading}</p>
+    {/if}
+
+    {#if result && !compareResult}
       {@const fi = result.file_info}
       {@const sa = result.signal_analysis}
       {@const dr = result.dynamic_range}
@@ -681,7 +730,8 @@ import Meter from "$lib/components/Meter.svelte";
      Colour survives in exactly two places, both load-bearing. The severity tints below are
      pulled far down in saturation so they read as tinted greys inside the monochrome world
      — this app's entire purpose is to state a verdict, and encoding that in weight alone
-     would be unreadable. The spectrogram keeps its inferno colormap: it is the one true
+     would be unreadable. The spectrogram keeps a perceptual colormap (inferno by default, three
+     alternatives offered under the legend): it is the one true
      data surface, and perceptually uniform beats on-palette for something users read
      values off. Greyscale chrome around one vivid readout is how instruments actually
      look, so the contrast is the point.
@@ -1366,6 +1416,13 @@ import Meter from "$lib/components/Meter.svelte";
   }
   .facts dd.bad {
     color: var(--bad);
+  }
+
+  .compare-loading {
+    margin: 2rem 0;
+    text-align: center;
+    font-size: 0.82rem;
+    color: var(--ink-mid);
   }
 
   .disclaimer {

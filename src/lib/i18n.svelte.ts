@@ -167,9 +167,25 @@ interface Dict {
     bandLevelsNote: string;
     toNyquist: string;
   };
+  compare: {
+    title: string;
+    add: string;
+    exit: string;
+    metric: string;
+    note: string;
+    loading: string;
+  };
   disclaimer: string;
   player: { play: string; pause: string; playbackPosition: string; mute: string; unmute: string; volume: string };
-  spectrogram: { seekAria: string; canvasAria: string; rawCutoff: (freq: string) => string };
+  spectrogram: {
+    seekAria: string;
+    canvasAria: string;
+    rawCutoff: (freq: string) => string;
+    quiet: string;
+    loud: string;
+    palette: string;
+    paletteName: (name: string) => string;
+  };
   mdct: {
     title: string;
     detected: string;
@@ -349,6 +365,14 @@ const fr: Dict = {
     bandLevelsNote: "Niveau moyen de chaque bande, relatif à la plus forte du fichier. C'est la forme spectrale dont le verdict est tiré : un mur d'encodeur y apparaît comme une chute brutale entre deux bandes voisines, un master sombre comme une pente régulière.",
     toNyquist: "Nyquist"
   },
+  compare: {
+    title: "Comparaison",
+    add: "Comparer avec un autre fichier",
+    exit: "Fermer la comparaison",
+    metric: "Mesure",
+    note: "Les lignes où les deux fichiers diffèrent sont mises en avant. Là où « mieux » a un sens sans ambiguïté — bande passante, plage dynamique, échantillons écrêtés, grille MDCT — le côté qui mène est signalé. Ailleurs les deux valeurs sont simplement posées côte à côte : arbitrer entre un spectre plus large et un master plus fort demanderait une pondération que cet outil n'a aucune base pour établir.",
+    loading: "Analyse du second fichier…"
+  },
   disclaimer:
     "Nyquist rapporte ce qu'il peut mesurer et le dit clairement quand ce n'est pas suffisant. Le verdict de transcodage repose surtout sur la forme de la pente spectrale, qui ne peut pas détecter un encodage transparent comme LAME V0 ou AAC 256 — un résultat propre n'est pas une preuve de provenance.",
   player: {
@@ -362,7 +386,12 @@ const fr: Dict = {
   spectrogram: {
     seekAria: "Cliquer pour déplacer la lecture",
     canvasAria: "Spectrogramme",
-    rawCutoff: (freq) => `coupure brute ~${freq}Hz`
+    rawCutoff: (freq) => `coupure brute ~${freq}Hz`,
+    quiet: "Faible",
+    loud: "Fort",
+    palette: "Palette du spectrogramme",
+    paletteName: (n) =>
+      n === "inferno" ? "Inferno" : n === "viridis" ? "Viridis" : n === "ice" ? "Glace" : "Monochrome"
   },
   mdct: {
     title: "Grille MDCT",
@@ -515,6 +544,14 @@ const en: Dict = {
     bandLevelsNote: "Average level of each band, relative to the loudest in the file. This is the spectral shape the verdict is drawn from: an encoder wall shows up as an abrupt fall between neighbouring bands, a dark master as a steady slope.",
     toNyquist: "Nyquist"
   },
+  compare: {
+    title: "Comparison",
+    add: "Compare with another file",
+    exit: "Close comparison",
+    metric: "Measurement",
+    note: "Rows where the two files disagree are brought forward. Where \"better\" is unambiguous — bandwidth, dynamic range, clipped samples, MDCT grid — the leading side is marked. Everywhere else the two values are simply placed side by side: choosing between a wider spectrum and a louder master would need a weighting this tool has no basis to set.",
+    loading: "Analyzing the second file…"
+  },
   disclaimer:
     "Nyquist reports what it can measure and says so when that is not enough. The transcode verdict rests mainly on the shape of the spectral rolloff, which cannot see a transparent encode such as LAME V0 or AAC 256 — a clean result is not proof of provenance.",
   player: {
@@ -528,7 +565,12 @@ const en: Dict = {
   spectrogram: {
     seekAria: "Click to seek playback position",
     canvasAria: "Spectrogram",
-    rawCutoff: (freq) => `raw cutoff ~${freq}Hz`
+    rawCutoff: (freq) => `raw cutoff ~${freq}Hz`,
+    quiet: "Quiet",
+    loud: "Loud",
+    palette: "Spectrogram palette",
+    paletteName: (n) =>
+      n === "inferno" ? "Inferno" : n === "viridis" ? "Viridis" : n === "ice" ? "Ice" : "Monochrome"
   },
   mdct: {
     title: "MDCT grid",
