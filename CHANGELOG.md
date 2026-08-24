@@ -6,6 +6,8 @@ releases start shipping.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-24
+
 ### Corrigé
 
 - **Les boutons de la barre du haut avaient doublé de taille.** `.ghost` était défini dans le

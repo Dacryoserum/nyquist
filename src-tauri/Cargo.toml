@@ -3,7 +3,7 @@ members = ["cli"]
 
 [package]
 name = "nyquist"
-version = "0.3.0"
+version = "0.4.0"
 description = "Desktop audio quality analyzer and lossy-to-lossless transcode detector"
 authors = ["Nyquist contributors"]
 license = "MIT"
