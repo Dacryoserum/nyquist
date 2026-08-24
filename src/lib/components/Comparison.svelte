@@ -41,6 +41,7 @@
 
   /** `better` says which side leads when that is a meaningful thing to say at all. */
   type Row = { label: string; a: string; b: string; better?: "a" | "b" | null };
+  type Group = { heading: string; rows: Row[] };
 
   /** Compares two numbers, returning the winning side or null when they are close enough
    * that calling one better would be noise. `epsilon` is per-metric because a 0.1 dB
@@ -56,11 +57,14 @@
     return aWins ? "a" : "b";
   }
 
-  const rows = $derived.by<Row[]>(() => {
+  /** Grouped rather than one flat list of eleven: the three groups answer different
+   * questions (what the file claims to be, what its spectrum shows, how it was mastered) and
+   * a reader is usually only chasing one of them at a time. */
+  const groups = $derived.by<Group[]>(() => {
     const [fa, fb] = [a.file_info, b.file_info];
     const [sa, sb] = [a.signal_analysis, b.signal_analysis];
     const [spa, spb] = [a.spectral_analysis, b.spectral_analysis];
-    return [
+    const declared: Row[] = [
       { label: T.file2.codec, a: fa.codec, b: fb.codec },
       { label: T.file2.sampleRate, a: fmtHz(fa.sample_rate_hz), b: fmtHz(fb.sample_rate_hz) },
       {
@@ -68,7 +72,9 @@
         a: fa.bit_depth ? T.file2.bits(fa.bit_depth) : "—",
         b: fb.bit_depth ? T.file2.bits(fb.bit_depth) : "—"
       },
-      { label: T.file2.duration, a: fmtDuration(fa.duration_seconds), b: fmtDuration(fb.duration_seconds) },
+      { label: T.file2.duration, a: fmtDuration(fa.duration_seconds), b: fmtDuration(fb.duration_seconds) }
+    ];
+    const spectrum: Row[] = [
       {
         label: T.spectrum.bandwidth,
         a: fmtHz(spa.spectral_cutoff_hz),
@@ -82,6 +88,18 @@
         // A shallower rolloff means less evidence of an encoder lowpass.
         better: lead(spa.rolloff_steepness_db_per_khz, spb.rolloff_steepness_db_per_khz, 5, false)
       },
+      {
+        label: T.mdct.title,
+        a: a.mdct_grid.analyzed ? `${fmt(a.mdct_grid.z_score, 1)} σ` : na(),
+        b: b.mdct_grid.analyzed ? `${fmt(b.mdct_grid.z_score, 1)} σ` : na(),
+        // Lower is better here: a high score is an encoder grid.
+        better:
+          a.mdct_grid.analyzed && b.mdct_grid.analyzed
+            ? lead(a.mdct_grid.z_score, b.mdct_grid.z_score, 10, false)
+            : null
+      }
+    ];
+    const mastering: Row[] = [
       {
         label: T.dynamics.dynamicRange,
         a: a.dynamic_range.dr14 !== null ? `DR${a.dynamic_range.dr14}` : na(),
@@ -103,16 +121,12 @@
         a: `${sa.clipping_count_total}`,
         b: `${sb.clipping_count_total}`,
         better: lead(sa.clipping_count_total, sb.clipping_count_total, 0, false)
-      },
-      {
-        label: T.mdct.title,
-        a: a.mdct_grid.analyzed ? `${fmt(a.mdct_grid.z_score, 1)} σ` : na(),
-        b: b.mdct_grid.analyzed ? `${fmt(b.mdct_grid.z_score, 1)} σ` : na(),
-        // Lower is better here: a high score is an encoder grid.
-        better: a.mdct_grid.analyzed && b.mdct_grid.analyzed
-          ? lead(a.mdct_grid.z_score, b.mdct_grid.z_score, 10, false)
-          : null
       }
+    ];
+    return [
+      { heading: T.compare.groupDeclared, rows: declared },
+      { heading: T.compare.groupSpectrum, rows: spectrum },
+      { heading: T.compare.groupMastering, rows: mastering }
     ];
   });
 </script>
@@ -150,19 +164,27 @@
         <th scope="col">B</th>
       </tr>
     </thead>
-    <tbody>
-      {#each rows as row (row.label)}
-        <tr class:differs={row.a !== row.b}>
-          <th scope="row">{row.label}</th>
-          <td class:leads={row.better === "a"}>{row.a}</td>
-          <td class:leads={row.better === "b"}>{row.b}</td>
+    {#each groups as group (group.heading)}
+      <tbody>
+        <tr class="group">
+          <th scope="colgroup" colspan="3">{group.heading}</th>
         </tr>
-      {/each}
-    </tbody>
+        {#each group.rows as row (row.label)}
+          <tr class:differs={row.a !== row.b}>
+            <th scope="row">{row.label}</th>
+            <td class:leads={row.better === "a"}>{row.a}</td>
+            <td class:leads={row.better === "b"}>{row.b}</td>
+          </tr>
+        {/each}
+      </tbody>
+    {/each}
   </table>
   <p class="note">{T.compare.note}</p>
 
-  <div class="stacked">
+  <!-- Full width and stacked, not side by side. A spectrogram needs horizontal room, and
+       stacking puts the two frequency axes on the same vertical line: to compare where the
+       content stops you look straight down instead of across a gap. -->
+  <div class="spectra">
     {#each [{ r: a, side: "A" }, { r: b, side: "B" }] as entry (entry.side)}
       <div class="panel">
         <span class="panel-label">{entry.side} — {entry.r.file_info.filename}</span>
@@ -172,6 +194,16 @@
           cutoffOverTimeHz={entry.r.spectral_analysis.cutoff_over_time_hz}
           showPalette={false}
         />
+      </div>
+    {/each}
+  </div>
+
+  <!-- These stay side by side: they are small, and the whole reading is "one has a spike,
+       the other does not", which is easiest to see with both in one glance. -->
+  <div class="grids">
+    {#each [{ r: a, side: "A" }, { r: b, side: "B" }] as entry (entry.side)}
+      <div class="panel">
+        <span class="panel-label">{entry.side} — {T.mdct.title}</span>
         <MdctGrid grid={entry.r.mdct_grid} />
       </div>
     {/each}
@@ -193,10 +225,16 @@
   }
 
   .verdicts,
-  .stacked {
+  .grids {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 1rem;
+  }
+
+  .spectra {
+    display: flex;
+    flex-direction: column;
+    gap: 1.2rem;
   }
 
   .verdict-card {
@@ -294,6 +332,23 @@
     width: 30%;
   }
 
+  /* Section headers inside the table. Sit on their own row rather than as separate tables
+     so all three groups keep one set of column widths and the A/B values stay aligned down
+     the whole thing. */
+  .delta tr.group th {
+    padding-top: 1.1rem;
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-low);
+    border-bottom-color: var(--ink-hair);
+  }
+
+  .delta tbody:first-of-type tr.group th {
+    padding-top: 0.42rem;
+  }
+
   /* Rows where the two files disagree are the only ones worth reading closely. */
   .delta tr.differs td {
     color: var(--ink-hi);
@@ -321,7 +376,7 @@
      than shrinking. */
   @media (max-width: 860px) {
     .verdicts,
-    .stacked {
+    .grids {
       grid-template-columns: 1fr;
     }
   }
