@@ -6,6 +6,18 @@ releases start shipping.
 
 ## [Unreleased]
 
+### Corrigé
+
+- **Un MP3 n'est plus accusé de transcodage.** Le verdict de cet outil répond à une question
+  précise : « ce fichier *sans perte* cache-t-il de l'audio avec perte ? » La poser sur un
+  MP3 est une erreur de catégorie, et elle produisait une réponse absurde — un MP3 ordinaire
+  sortait « probablement transcodé » à 80 %, et un fichier AAC à 95 % parce que la détection
+  de grille MDCT y trouvait, correctement, la grille qui est *censée* s'y trouver. Rien n'est
+  dissimulé dans ces cas-là. Un quatrième état, « format avec perte, annoncé », le dit sans
+  pourcentage — ce n'est pas une inférence, le conteneur l'affirme. **Toutes les mesures
+  restent affichées**, y compris le passe-bas et la grille de l'encodeur, qui renseignent sur
+  ses réglages. Un FLAC cachant de l'AAC reste évidemment détecté (90 %).
+
 ### Modifié
 
 - **Builds de développement optimisés.** Le balayage MDCT s'effondre sans optimisation : une

@@ -150,6 +150,27 @@ pub enum Verdict {
     ProbablyAuthentic,
     ProbablyTranscoded,
     Indeterminate,
+    /// The file is in a lossy format and says so. Not a verdict about deception — the
+    /// question this module asks does not arise.
+    ///
+    /// The other three states answer "is this *lossless* file secretly lossy?". Running that
+    /// question on an MP3 is a category error, and it produced a genuinely absurd answer: an
+    /// ordinary MP3 came out "probably transcoded" at 80%, and an AAC file at 95% because
+    /// `mdct_grid` correctly found the encoder grid that is *supposed* to be there. Nothing
+    /// is hidden in either case. Every measurement is still reported; only the accusation is
+    /// withdrawn.
+    DeclaredLossy,
+}
+
+/// Codecs that are lossy by definition, so a file in one of them is not hiding anything.
+///
+/// An explicit list rather than "not a known lossless codec": the failure directions are not
+/// symmetric. Wrongly calling a lossy codec lossless leaves the status quo — a nonsensical
+/// verdict. Wrongly calling a *lossless* codec lossy would silently switch off the check on
+/// a file that needs it, which is far worse. An unrecognized codec therefore keeps the full
+/// assessment.
+fn is_declared_lossy(codec: &str) -> bool {
+    matches!(codec, "mp3" | "mp2" | "mp1" | "aac" | "vorbis" | "opus")
 }
 
 #[derive(Debug, Serialize)]
@@ -231,6 +252,8 @@ pub enum IndicatorDetail {
     MdctGridClear,
     /// Content runs above the ceiling any CD-rate lossy encode could carry.
     BandwidthAboveCdCeiling { cutoff_khz: f64 },
+    /// The container declares a lossy codec, so there is no disguise to see through.
+    DeclaredLossyCodec { codec: String },
 }
 
 impl IndicatorDetail {
@@ -293,6 +316,14 @@ impl IndicatorDetail {
                  measurement cannot see. It says nothing about MP3, whose hybrid filterbank \
                  this test cannot invert, so the blind spot narrows rather than closes."
                 .to_string(),
+            Self::DeclaredLossyCodec { codec } => format!(
+                "This file is {}, which is a lossy format. It is not pretending to be \
+                 anything else, so there is no transcode to detect: the question this \
+                 verdict answers — whether a lossless container is hiding lossy audio — does \
+                 not apply. Every measurement below still describes the file accurately, \
+                 including the encoder's own lowpass and frame grid.",
+                codec.to_uppercase()
+            ),
             Self::BandwidthAboveCdCeiling { cutoff_khz } => format!(
                 "Content runs to {cutoff_khz:.1} kHz, above the 22.05 kHz ceiling any \
                  CD-rate source could carry. This rules out the most common transcode path \
@@ -314,7 +345,24 @@ pub fn assess_transcode_risk(
     nyquist_hz: f64,
     encoder_tag_matches: &[EncoderTagMatch],
     mdct_grid: &MdctGridAnalysis,
+    codec: &str,
 ) -> TranscodeAssessment {
+    // Short-circuit before any of the evidence below is weighed. None of it is *wrong* on a
+    // lossy file — a lowpass and an encoder grid really are there — but all of it would be
+    // answering a question nobody asked.
+    if is_declared_lossy(codec) {
+        return TranscodeAssessment {
+            verdict: Verdict::DeclaredLossy,
+            // Not an inference, so not a probability. The container states this outright, and
+            // the UI omits the percentage for this verdict rather than printing a confident
+            // 100% that would look like the same kind of claim as the other three.
+            confidence_score: 1.0,
+            indicators: vec![Indicator::new(IndicatorDetail::DeclaredLossyCodec {
+                codec: codec.to_string(),
+            })],
+        };
+    }
+
     let mut assessment = assess_from_spectrum(spectral, nyquist_hz);
     apply_mdct_grid_evidence(&mut assessment, mdct_grid);
     apply_tag_evidence(&mut assessment, encoder_tag_matches);
@@ -413,6 +461,10 @@ fn apply_tag_evidence(assessment: &mut TranscodeAssessment, matches: &[EncoderTa
             assessment.confidence_score = TAG_MATCH_ONLY_CONFIDENCE;
             assessment.indicators.push(Indicator::new(IndicatorDetail::TagIsOnlyEvidence));
         }
+        // Unreachable: `assess_transcode_risk` returns before any evidence is applied when
+        // the codec is lossy. Spelled out rather than folded into a catch-all so that adding
+        // a fifth verdict is a compile error here instead of a silent fall-through.
+        Verdict::DeclaredLossy => {}
         // Direct conflict: measurement says full bandwidth, metadata says lossy tool.
         Verdict::ProbablyAuthentic => {
             assessment.verdict = Verdict::Indeterminate;

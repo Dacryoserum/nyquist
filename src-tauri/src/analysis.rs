@@ -152,6 +152,7 @@ pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings
         file_info.nyquist_hz as f64,
         &decoded.encoder_tag_matches,
         &mdct_grid,
+        &decoded.codec_short_name,
     );
     let sample_rate_analysis = sample_rate::analyze_sample_rate(
         file_info.sample_rate_hz,
