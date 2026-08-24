@@ -62,3 +62,23 @@ lto = "thin"
 codegen-units = 16
 strip = true
 
+
+# Dependencies are optimized even in dev builds; our own crate is not.
+#
+# The MDCT grid sweep in `mdct_grid.rs` runs 1024 offsets of FFT work, which is the kind of
+# code that collapses without optimization: a 5-minute track took 55s to analyze under
+# `tauri dev` against a fraction of a second in release. That made the dev app unusable for
+# its own purpose and the corpus test take three and a half minutes.
+#
+# Optimizing only `package."*"` keeps *our* crate unoptimized, so incremental rebuilds stay
+# fast and backtraces stay readable — it is the dependencies (rustfft, symphonia, ebur128)
+# that do the arithmetic. Costs one slower cold build; changes nothing about release output.
+[profile.dev]
+# Light optimization on our own crate too. The sweep loop in `mdct_grid.rs` is ours, so
+# optimizing only the dependencies took the same 5-minute track from 55s to 21s — better,
+# still too slow to use. Level 1 rather than 2 keeps line numbers and locals intact in a
+# backtrace, which is the reason to run a dev build at all.
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 2

@@ -6,6 +6,16 @@ releases start shipping.
 
 ## [Unreleased]
 
+### Modifié
+
+- **Builds de développement optimisés.** Le balayage MDCT s'effondre sans optimisation : une
+  piste de 5 minutes prenait **55 s** sous `tauri dev` contre moins d'une seconde en release,
+  ce qui rendait l'app de dev inutilisable pour son propre usage et le test de corpus
+  interminable. Les dépendances sont désormais compilées en `opt-level = 2` et notre propre
+  crate en `opt-level = 1` (assez bas pour garder des backtraces lisibles). Même piste :
+  **1,2 s**. Le test de corpus passe de 207 s à 5,8 s. Aucun effet sur le binaire de release.
+
+
 ### Ajouté
 
 - **Détection de la grille MDCT — le point aveugle AAC est fermé** (`mdct_grid.rs`). La MDCT
@@ -43,7 +53,6 @@ releases start shipping.
 ### Corrigé
 
 - La légende du spectrogramme (« Quiet »/« Loud ») était restée en anglais.
-
 
 ## [0.3.0] - 2026-08-21
 
