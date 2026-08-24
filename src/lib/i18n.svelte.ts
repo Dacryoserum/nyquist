@@ -15,6 +15,20 @@
 
 import type { Indicator } from "$lib/api";
 
+/** Display name for a codec short name. Acronyms stay upper-case, words stay capitalized —
+ * "OPUS" and "VORBIS" read as shouting where "Opus" and "Vorbis" are just names. */
+function codecName(codec: string): string {
+  const known: Record<string, string> = {
+    mp3: "MP3",
+    mp2: "MP2",
+    mp1: "MP1",
+    aac: "AAC",
+    vorbis: "Vorbis",
+    opus: "Opus"
+  };
+  return known[codec] ?? codec.toUpperCase();
+}
+
 export type Lang = "fr" | "en";
 
 const STORAGE_KEY = "nyquist-lang";
@@ -67,7 +81,8 @@ interface Dict {
     probablyAuthentic: { label: string; blurb: string };
     probablyTranscoded: { label: string; blurb: string };
     indeterminate: { label: string; blurb: string };
-    declaredLossy: { label: string; blurb: string };
+    /** Names the format, because "lossy" alone leaves the reader asking which one. */
+    declaredLossy: { label: (codec: string) => string; blurb: string };
     confidence: string;
   };
   /** Renders one piece of the verdict's evidence. Exhaustive over `Indicator["code"]` in
@@ -170,6 +185,8 @@ interface Dict {
   };
   compare: {
     title: string;
+    /** Button label — short, because it sits in a row of two other labelled actions. */
+    action: string;
     add: string;
     exit: string;
     metric: string;
@@ -177,7 +194,8 @@ interface Dict {
     loading: string;
     groupDeclared: string;
     groupSpectrum: string;
-    groupMastering: string;
+    yes: string;
+    no: string;
   };
   disclaimer: string;
   player: { play: string; pause: string; playbackPosition: string; mute: string; unmute: string; volume: string };
@@ -238,7 +256,7 @@ const fr: Dict = {
       blurb: "Pas assez d'éléments dans un sens ou dans l'autre. C'est une réponse à part entière, pas un échec."
     },
     declaredLossy: {
-      label: "Format avec perte, annoncé",
+      label: (codec) => `Format avec perte (${codecName(codec)})`,
       blurb: "Ce fichier est dans un format avec perte et ne prétend pas le contraire. Il n'y a donc rien à démasquer — les mesures ci-dessous le décrivent quand même intégralement."
     },
     confidence: "confiance"
@@ -371,12 +389,13 @@ const fr: Dict = {
     stopbandDepth: "Profondeur du stopband",
     stopbandNote: "de combien la zone au-dessus de la coupure descend sous celle du dessous",
     noStopband: "aucune coupure détectée",
-    bandLevels: "Niveaux par bande",
+    bandLevels: "Niveaux par bande (dB)",
     bandLevelsNote: "Niveau moyen de chaque bande, relatif à la plus forte du fichier. C'est la forme spectrale dont le verdict est tiré : un mur d'encodeur y apparaît comme une chute brutale entre deux bandes voisines, un master sombre comme une pente régulière.",
     toNyquist: "Nyquist"
   },
   compare: {
     title: "Comparaison",
+    action: "Comparer",
     add: "Comparer avec un autre fichier",
     exit: "Fermer la comparaison",
     metric: "Mesure",
@@ -384,7 +403,8 @@ const fr: Dict = {
     loading: "Analyse du second fichier…",
     groupDeclared: "Ce que le fichier annonce",
     groupSpectrum: "Ce que le spectre montre",
-    groupMastering: "Mastering"
+    yes: "oui",
+    no: "non"
   },
   disclaimer:
     "Nyquist rapporte ce qu'il peut mesurer et le dit clairement quand ce n'est pas suffisant. Le verdict de transcodage repose surtout sur la forme de la pente spectrale, qui ne peut pas détecter un encodage transparent comme LAME V0 ou AAC 256 — un résultat propre n'est pas une preuve de provenance.",
@@ -454,7 +474,7 @@ const en: Dict = {
       blurb: "Not enough evidence either way. That is a real answer, not a failure."
     },
     declaredLossy: {
-      label: "Lossy, and says so",
+      label: (codec) => `Lossy format (${codecName(codec)})`,
       blurb: "This file is in a lossy format and is not pretending otherwise, so there is nothing to see through. The measurements below still describe it in full."
     },
     confidence: "confidence"
@@ -557,12 +577,13 @@ const en: Dict = {
     stopbandDepth: "Stopband depth",
     stopbandNote: "how far the region above the cutoff sits below the region under it",
     noStopband: "no edge found",
-    bandLevels: "Band levels",
+    bandLevels: "Band levels (dB)",
     bandLevelsNote: "Average level of each band, relative to the loudest in the file. This is the spectral shape the verdict is drawn from: an encoder wall shows up as an abrupt fall between neighbouring bands, a dark master as a steady slope.",
     toNyquist: "Nyquist"
   },
   compare: {
     title: "Comparison",
+    action: "Compare",
     add: "Compare with another file",
     exit: "Close comparison",
     metric: "Measurement",
@@ -570,7 +591,8 @@ const en: Dict = {
     loading: "Analyzing the second file…",
     groupDeclared: "What the file claims",
     groupSpectrum: "What the spectrum shows",
-    groupMastering: "Mastering"
+    yes: "yes",
+    no: "no"
   },
   disclaimer:
     "Nyquist reports what it can measure and says so when that is not enough. The transcode verdict rests mainly on the shape of the spectral rolloff, which cannot see a transparent encode such as LAME V0 or AAC 256 — a clean result is not proof of provenance.",

@@ -32,11 +32,16 @@
     `${Math.floor(s / 60)}:${Math.round(s % 60).toString().padStart(2, "0")}`;
   const na = () => T.loudness.na;
 
-  const verdictMeta: Record<Verdict, { label: string; icon: IconName; tone: string }> = $derived({
+  /** Built per side, because the lossy label names the file's own codec. */
+  const verdictMetaFor = (r: AnalysisResult): Record<Verdict, { label: string; icon: IconName; tone: string }> => ({
     probably_authentic: { label: T.verdict.probablyAuthentic.label, icon: "checkCircle", tone: "authentic" },
     probably_transcoded: { label: T.verdict.probablyTranscoded.label, icon: "alertCircle", tone: "transcoded" },
     indeterminate: { label: T.verdict.indeterminate.label, icon: "helpCircle", tone: "indeterminate" },
-    declared_lossy: { label: T.verdict.declaredLossy.label, icon: "waveform", tone: "declared" }
+    declared_lossy: {
+      label: T.verdict.declaredLossy.label(r.file_info.codec),
+      icon: "waveform",
+      tone: "declared"
+    }
   });
 
   /** `better` says which side leads when that is a meaningful thing to say at all. */
@@ -64,6 +69,17 @@
     const [fa, fb] = [a.file_info, b.file_info];
     const [sa, sb] = [a.signal_analysis, b.signal_analysis];
     const [spa, spb] = [a.spectral_analysis, b.spectral_analysis];
+    const [sta, stb] = [a.stereo_analysis, b.stereo_analysis];
+
+    const integrity = (v: boolean | null, codec: string) =>
+      v === true
+        ? T.file2.integrityVerified
+        : v === false
+          ? T.file2.integrityMismatch
+          : codec === "flac"
+            ? T.file2.integrityNoChecksum
+            : T.file2.integrityUnavailable;
+
     const declared: Row[] = [
       { label: T.file2.codec, a: fa.codec, b: fb.codec },
       { label: T.file2.sampleRate, a: fmtHz(fa.sample_rate_hz), b: fmtHz(fb.sample_rate_hz) },
@@ -72,8 +88,24 @@
         a: fa.bit_depth ? T.file2.bits(fa.bit_depth) : "—",
         b: fb.bit_depth ? T.file2.bits(fb.bit_depth) : "—"
       },
-      { label: T.file2.duration, a: fmtDuration(fa.duration_seconds), b: fmtDuration(fb.duration_seconds) }
+      { label: T.file2.duration, a: fmtDuration(fa.duration_seconds), b: fmtDuration(fb.duration_seconds) },
+      {
+        label: T.file2.size,
+        a: T.file2.megabytes(fmt(fa.file_size_bytes / 1_000_000, 1)),
+        b: T.file2.megabytes(fmt(fb.file_size_bytes / 1_000_000, 1))
+      },
+      {
+        label: T.file2.avgBitrate,
+        a: fa.bitrate_kbps ? `${fmt(fa.bitrate_kbps, 0)} kbps` : "—",
+        b: fb.bitrate_kbps ? `${fmt(fb.bitrate_kbps, 0)} kbps` : "—"
+      },
+      {
+        label: T.file2.integrity,
+        a: integrity(fa.integrity_verified, fa.codec),
+        b: integrity(fb.integrity_verified, fb.codec)
+      }
     ];
+
     const spectrum: Row[] = [
       {
         label: T.spectrum.bandwidth,
@@ -89,6 +121,16 @@
         better: lead(spa.rolloff_steepness_db_per_khz, spb.rolloff_steepness_db_per_khz, 5, false)
       },
       {
+        label: T.spectralDetail.stopbandDepth,
+        a: spa.stopband_depth_db !== null ? `${fmt(spa.stopband_depth_db, 0)} dB` : T.spectralDetail.noStopband,
+        b: spb.stopband_depth_db !== null ? `${fmt(spb.stopband_depth_db, 0)} dB` : T.spectralDetail.noStopband
+      },
+      {
+        label: T.spectralDetail.stability,
+        a: `± ${fmtHz(spa.cutoff_stability_hz)}`,
+        b: `± ${fmtHz(spb.cutoff_stability_hz)}`
+      },
+      {
         label: T.mdct.title,
         a: a.mdct_grid.analyzed ? `${fmt(a.mdct_grid.z_score, 1)} σ` : na(),
         b: b.mdct_grid.analyzed ? `${fmt(b.mdct_grid.z_score, 1)} σ` : na(),
@@ -99,22 +141,39 @@
             : null
       }
     ];
-    const mastering: Row[] = [
-      {
-        label: T.dynamics.dynamicRange,
-        a: a.dynamic_range.dr14 !== null ? `DR${a.dynamic_range.dr14}` : na(),
-        b: b.dynamic_range.dr14 !== null ? `DR${b.dynamic_range.dr14}` : na(),
-        better: lead(a.dynamic_range.dr14, b.dynamic_range.dr14, 0.5)
-      },
+
+    const loudness: Row[] = [
       {
         label: T.loudness.integratedLoudness,
         a: sa.lufs_integrated !== null ? `${fmt(sa.lufs_integrated)} LUFS` : na(),
         b: sb.lufs_integrated !== null ? `${fmt(sb.lufs_integrated)} LUFS` : na()
       },
       {
+        label: T.loudness.loudnessRange,
+        a: sa.loudness_range_lu !== null ? `${fmt(sa.loudness_range_lu)} LU` : na(),
+        b: sb.loudness_range_lu !== null ? `${fmt(sb.loudness_range_lu)} LU` : na(),
+        better: lead(sa.loudness_range_lu, sb.loudness_range_lu, 0.5)
+      },
+      {
         label: T.loudness.truePeak,
         a: `${fmt(sa.true_peak_dbtp)} dBTP`,
-        b: `${fmt(sb.true_peak_dbtp)} dBTP`
+        b: `${fmt(sb.true_peak_dbtp)} dBTP`,
+        // Lower true peak means more headroom before a downstream encode clips.
+        better: lead(sa.true_peak_dbtp, sb.true_peak_dbtp, 0.3, false)
+      },
+      {
+        label: T.loudness.peakRms,
+        a: `${fmt(sa.peak_dbfs)} / ${fmt(sa.rms_dbfs)} dBFS`,
+        b: `${fmt(sb.peak_dbfs)} / ${fmt(sb.rms_dbfs)} dBFS`
+      }
+    ];
+
+    const dynamics: Row[] = [
+      {
+        label: T.dynamics.dynamicRange,
+        a: a.dynamic_range.dr14 !== null ? `DR${a.dynamic_range.dr14}` : na(),
+        b: b.dynamic_range.dr14 !== null ? `DR${b.dynamic_range.dr14}` : na(),
+        better: lead(a.dynamic_range.dr14, b.dynamic_range.dr14, 0.5)
       },
       {
         label: T.dynamics.clippedSamples,
@@ -123,10 +182,44 @@
         better: lead(sa.clipping_count_total, sb.clipping_count_total, 0, false)
       }
     ];
+
+    const stereoRows: Row[] = [
+      {
+        label: T.stereo.correlation,
+        a: sta ? fmt(sta.correlation, 2) : na(),
+        b: stb ? fmt(stb.correlation, 2) : na()
+      },
+      {
+        label: T.stereo.width,
+        a: sta ? `${fmt(sta.side_to_mid_db, 1)} dB` : na(),
+        b: stb ? `${fmt(stb.side_to_mid_db, 1)} dB` : na()
+      },
+      // Only worth a row when at least one side is affected; otherwise it is a line of "no"
+      // in a table that is already long.
+      ...(sta?.dual_mono || stb?.dual_mono
+        ? [
+            {
+              label: T.stereo.dualMono,
+              a: sta?.dual_mono ? T.compare.yes : T.compare.no,
+              b: stb?.dual_mono ? T.compare.yes : T.compare.no
+            }
+          ]
+        : []),
+      ...(sta && stb
+        ? sta.per_band.map((band, i) => ({
+            label: `${T.stereo.perBand} · ${T.stereo.bandName(band.name)}`,
+            a: `${fmt(band.side_to_mid_db, 0)} dB`,
+            b: `${fmt(stb.per_band[i]?.side_to_mid_db ?? 0, 0)} dB`
+          }))
+        : [])
+    ];
+
     return [
       { heading: T.compare.groupDeclared, rows: declared },
       { heading: T.compare.groupSpectrum, rows: spectrum },
-      { heading: T.compare.groupMastering, rows: mastering }
+      { heading: T.loudness.title, rows: loudness },
+      { heading: T.dynamics.title, rows: dynamics },
+      { heading: T.stereo.title, rows: stereoRows }
     ];
   });
 </script>
@@ -134,14 +227,14 @@
 <section class="compare">
   <header class="compare-head">
     <h2 class="section-title">{T.compare.title}</h2>
-    <button class="ghost" onclick={onClear}>
-      <Icon name="close" size={13} /> {T.compare.exit}
+    <button class="ghost icon-only" onclick={onClear} aria-label={T.compare.exit} title={T.compare.exit}>
+      <Icon name="close" size={14} />
     </button>
   </header>
 
   <div class="verdicts">
     {#each [{ r: a, side: "A" }, { r: b, side: "B" }] as entry (entry.side)}
-      {@const vm = verdictMeta[entry.r.transcode_assessment.verdict]}
+      {@const vm = verdictMetaFor(entry.r)[entry.r.transcode_assessment.verdict]}
       <article class="verdict-card {vm.tone}">
         <span class="side">{entry.side}</span>
         <h3 class="name" title={entry.r.file_info.filename}>{entry.r.file_info.filename}</h3>
@@ -181,9 +274,9 @@
   </table>
   <p class="note">{T.compare.note}</p>
 
-  <!-- Full width and stacked, not side by side. A spectrogram needs horizontal room, and
-       stacking puts the two frequency axes on the same vertical line: to compare where the
-       content stops you look straight down instead of across a gap. -->
+  <!-- Side by side, because comparing two pictures means seeing both at once. They fall to
+       one column only when the window gets far narrower than its 1000px default, at which
+       point each half is too cramped to read and stacking is the lesser loss. -->
   <div class="spectra">
     {#each [{ r: a, side: "A" }, { r: b, side: "B" }] as entry (entry.side)}
       <div class="panel">
@@ -232,9 +325,9 @@
   }
 
   .spectra {
-    display: flex;
-    flex-direction: column;
-    gap: 1.2rem;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
   }
 
   .verdict-card {
@@ -358,6 +451,9 @@
     color: var(--ok);
   }
 
+  /* `min-width: 0` matters: without it a grid item refuses to shrink below its content's
+     intrinsic width, and the spectrogram canvas would push the two columns wider than the
+     window instead of narrowing with it. */
   .panel {
     display: flex;
     flex-direction: column;
@@ -372,11 +468,20 @@
     line-height: 1.6;
   }
 
-  /* Below this the two columns stop being comparable at a glance and stacking reads better
-     than shrinking. */
+  /* Below this the verdict cards and grid charts stop being comparable at a glance and
+     stacking reads better than shrinking. */
   @media (max-width: 860px) {
     .verdicts,
     .grids {
+      grid-template-columns: 1fr;
+    }
+  }
+
+  /* The spectrograms hold out longer: side by side is the whole point of them here, and a
+     narrow pair still compares better than a stacked one. This is well under the window's
+     1000px default, so it only triggers on a deliberately shrunken window. */
+  @media (max-width: 700px) {
+    .spectra {
       grid-template-columns: 1fr;
     }
   }

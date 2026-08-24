@@ -10,6 +10,7 @@
     type AnalysisResult,
     type Verdict
   } from "$lib/api";
+  import BandLevels from "$lib/components/BandLevels.svelte";
   import Comparison from "$lib/components/Comparison.svelte";
   import Icon from "$lib/components/Icon.svelte";
   import MdctGrid from "$lib/components/MdctGrid.svelte";
@@ -221,7 +222,7 @@ import Meter from "$lib/components/Meter.svelte";
       blurb: T.verdict.indeterminate.blurb
     },
     declared_lossy: {
-      label: T.verdict.declaredLossy.label,
+      label: T.verdict.declaredLossy.label(result?.file_info.codec ?? ""),
       icon: "waveform",
       tone: "declared",
       blurb: T.verdict.declaredLossy.blurb
@@ -304,15 +305,12 @@ import Meter from "$lib/components/Meter.svelte";
           <Icon name="download" size={14} /> {T.actions.exportJson}
         </button>
         <!-- Comparison is opt-in and rare, so it gets the same quiet ghost chrome as the
-             other topbar actions rather than a primary button competing with the verdict. -->
-        <button
-          class="ghost icon-only"
-          onclick={pickAndCompare}
-          disabled={compareLoading}
-          aria-label={T.compare.add}
-          title={T.compare.add}
-        >
-          <Icon name={compareLoading ? "refresh" : "plus"} size={15} />
+             other topbar actions rather than a primary button competing with the verdict.
+             Labelled rather than icon-only: a bare "+" beside two labelled buttons reads as
+             "add" without saying what to, which is the one thing worth saying here. -->
+        <button class="ghost" onclick={pickAndCompare} disabled={compareLoading} title={T.compare.add}>
+          <Icon name={compareLoading ? "refresh" : "compare"} size={14} />
+          {T.compare.action}
         </button>
       {/if}
       <!-- Discreet by design: two-letter code naming the *other* language, matching the
@@ -616,17 +614,7 @@ import Meter from "$lib/components/Meter.svelte";
                an encoder wall reads as an abrupt fall between neighbours, a dark master as a
                steady slope. -->
           <span class="label band-label">{T.spectralDetail.bandLevels}</span>
-          <div class="bands">
-            {#each spa.band_levels_db as band (band.low_hz)}
-              <div class="band-row">
-                <span class="band-range">
-                  {fmtHz(band.low_hz)}–{band.high_hz !== null ? fmtHz(band.high_hz) : T.spectralDetail.toNyquist}
-                </span>
-                <Meter value={band.level_db} min={-90} max={0} />
-                <span class="band-value">{fmt(band.level_db, 0)}</span>
-              </div>
-            {/each}
-          </div>
+          <BandLevels bands={spa.band_levels_db} />
           <p class="note">{T.spectralDetail.bandLevelsNote}</p>
         </section>
 
@@ -640,7 +628,20 @@ import Meter from "$lib/components/Meter.svelte";
                 <span class="label">{T.stereo.correlation}</span>
                 <span class="value {st.mono_compatibility_risk ? 'warn' : ''}">{fmt(st.correlation, 2)}</span>
               </div>
-              <Meter value={st.correlation} min={-1} max={1} reference={0} referenceLabel="0" />
+              <!-- Gradient here because the distance along this scale *is* the reading:
+                   channels that are merely similar and channels that are effectively one
+                   differ in kind, and a uniformly lit row of dots hides that. The tick at 0
+                   marks where correlation stops meaning "narrow" and starts meaning "out of
+                   phase". -->
+              <Meter
+                value={st.correlation}
+                min={-1}
+                max={1}
+                reference={0}
+                referenceLabel="0"
+                tone={st.mono_compatibility_risk ? "bad" : "good"}
+                gradient
+              />
               <span class="scale-note">{T.stereo.correlationNote}</span>
             </div>
 
@@ -865,12 +866,20 @@ import Meter from "$lib/components/Meter.svelte";
     gap: 0.4rem;
   }
 
-  button {
+  /* Global because `.ghost` below is, and the two have to be judged by the same cascade.
+     While this was scoped, Svelte compiled it to `button.svelte-hash` — specificity (0,1,1),
+     which beat a plain global `.ghost` at (0,1,0) and reset the ghost buttons back to the
+     body font at body size. Global, it is (0,0,1) and loses to `.ghost` on specificity
+     rather than on source order, which is the part that should not be fragile. */
+  :global(button) {
     font: inherit;
     cursor: pointer;
   }
 
-  .ghost {
+  /* Global, like the theme tokens above: `.ghost` is a design-system button, not a style
+     belonging to this page. Scoping it here meant the close button in Comparison.svelte
+     rendered as a raw unstyled `<button>`. */
+  :global(.ghost) {
     display: inline-flex;
     align-items: center;
     gap: 0.42rem;
@@ -886,17 +895,17 @@ import Meter from "$lib/components/Meter.svelte";
     transition: color 0.18s ease, border-color 0.18s ease;
   }
 
-  .ghost:hover:not(:disabled) {
+  :global(.ghost:hover:not(:disabled)) {
     color: var(--ink-hi);
     border-color: var(--ink-faint);
   }
 
-  .ghost:disabled {
+  :global(.ghost:disabled) {
     opacity: 0.4;
     cursor: default;
   }
 
-  .icon-only {
+  :global(.ghost.icon-only) {
     padding: 0.44em 0.55em;
   }
 
@@ -1008,6 +1017,21 @@ import Meter from "$lib/components/Meter.svelte";
     border: 1px solid var(--ink-hair);
     border-radius: 3px;
     background: var(--bg-raised);
+  }
+
+  /* Only the paired cards, not every card. Column layout lets the trailing note be pushed
+     to the bottom of a stretched card, so the height one gains from its taller neighbour
+     lands between content and footnote — read as spacing — instead of piling up underneath
+     as an empty block. Applying it to full-width cards too would needlessly change the
+     layout of things that are already fine, like the channel table. */
+  .metric-columns > .card {
+    display: flex;
+    flex-direction: column;
+  }
+
+  .metric-columns > .card > .note:last-child {
+    margin-top: auto;
+    padding-top: 1rem;
   }
 
   .section-title {
@@ -1265,11 +1289,14 @@ import Meter from "$lib/components/Meter.svelte";
     line-height: 1.5;
   }
 
+  /* Cards in a row stretch to the tallest rather than sizing to their own content. The
+     dead space that usually creates is avoided by pushing each card's closing note to the
+     bottom (below), so a shorter card reads as deliberately aligned rather than unfinished. */
   .metric-columns {
     display: grid;
     grid-template-columns: 1fr 1fr;
     gap: 1.15rem;
-    align-items: start;
+    align-items: stretch;
   }
 
   .spectral-stats {
