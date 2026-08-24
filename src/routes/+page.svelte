@@ -219,6 +219,12 @@ import Meter from "$lib/components/Meter.svelte";
       icon: "helpCircle",
       tone: "indeterminate",
       blurb: T.verdict.indeterminate.blurb
+    },
+    declared_lossy: {
+      label: T.verdict.declaredLossy.label,
+      icon: "waveform",
+      tone: "declared",
+      blurb: T.verdict.declaredLossy.blurb
     }
   });
 
@@ -372,10 +378,15 @@ import Meter from "$lib/components/Meter.svelte";
             <h2>{vm.label}</h2>
             <p>{vm.blurb}</p>
           </div>
-          <div class="confidence">
-            <span class="confidence-value">{fmt(ta.confidence_score * 100, 0)}<i>%</i></span>
-            <span class="confidence-label">{T.verdict.confidence}</span>
-          </div>
+          <!-- No percentage for `declared_lossy`: the container states it outright, so a
+               confident-looking 100% would read as the same kind of claim as the other
+               three verdicts, which it is not. -->
+          {#if ta.verdict !== "declared_lossy"}
+            <div class="confidence">
+              <span class="confidence-value">{fmt(ta.confidence_score * 100, 0)}<i>%</i></span>
+              <span class="confidence-label">{T.verdict.confidence}</span>
+            </div>
+          {/if}
         </div>
         <ul class="evidence">
           {#each ta.indicators as indicator (indicator.code)}
@@ -1023,6 +1034,12 @@ import Meter from "$lib/components/Meter.svelte";
   }
   .verdict.indeterminate {
     --verdict-ink: var(--ink-low);
+  }
+
+  /* A lossy file that says it is lossy is not a finding, so this state carries no severity
+     tint at all — it reads as plain chrome next to the three that do mean something. */
+  .verdict.declared {
+    --verdict-ink: var(--ink-mid);
   }
 
   .verdict-head {

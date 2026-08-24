@@ -107,7 +107,14 @@ export interface SpectralAnalysis {
   spectrogram: SpectrogramData;
 }
 
-export type Verdict = "probably_authentic" | "probably_transcoded" | "indeterminate";
+/** `declared_lossy` is not a verdict about deception: the file is in a lossy format and says
+ * so, which means the question the other three answer — is a lossless container hiding lossy
+ * audio — does not apply. The UI omits the confidence percentage for it. */
+export type Verdict =
+  | "probably_authentic"
+  | "probably_transcoded"
+  | "indeterminate"
+  | "declared_lossy";
 
 /** One stated observation behind a verdict, discriminated on `code`.
  *
@@ -139,7 +146,8 @@ export type IndicatorDetail =
       baseline_percent: number;
     }
   | { code: "mdct_grid_clear" }
-  | { code: "bandwidth_above_cd_ceiling"; cutoff_khz: number };
+  | { code: "bandwidth_above_cd_ceiling"; cutoff_khz: number }
+  | { code: "declared_lossy_codec"; codec: string };
 
 /** A piece of evidence, carrying the backend's English prose *and* the raw observation.
  *

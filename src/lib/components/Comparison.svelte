@@ -35,7 +35,8 @@
   const verdictMeta: Record<Verdict, { label: string; icon: IconName; tone: string }> = $derived({
     probably_authentic: { label: T.verdict.probablyAuthentic.label, icon: "checkCircle", tone: "authentic" },
     probably_transcoded: { label: T.verdict.probablyTranscoded.label, icon: "alertCircle", tone: "transcoded" },
-    indeterminate: { label: T.verdict.indeterminate.label, icon: "helpCircle", tone: "indeterminate" }
+    indeterminate: { label: T.verdict.indeterminate.label, icon: "helpCircle", tone: "indeterminate" },
+    declared_lossy: { label: T.verdict.declaredLossy.label, icon: "waveform", tone: "declared" }
   });
 
   /** `better` says which side leads when that is a meaningful thing to say at all. */
@@ -133,7 +134,9 @@
         <div class="verdict-line">
           <Icon name={vm.icon} size={20} />
           <span class="label">{vm.label}</span>
-          <span class="confidence">{fmt(entry.r.transcode_assessment.confidence_score * 100, 0)}%</span>
+          {#if entry.r.transcode_assessment.verdict !== "declared_lossy"}
+            <span class="confidence">{fmt(entry.r.transcode_assessment.confidence_score * 100, 0)}%</span>
+          {/if}
         </div>
       </article>
     {/each}
@@ -214,6 +217,10 @@
   }
   .verdict-card.indeterminate {
     border-color: color-mix(in srgb, var(--warn) 40%, var(--ink-hair));
+  }
+  /* Neutral: this state is not a finding, so it gets no severity tint. */
+  .verdict-card.declared {
+    border-color: var(--ink-hair);
   }
 
   .side,

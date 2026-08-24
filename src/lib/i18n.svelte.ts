@@ -67,6 +67,7 @@ interface Dict {
     probablyAuthentic: { label: string; blurb: string };
     probablyTranscoded: { label: string; blurb: string };
     indeterminate: { label: string; blurb: string };
+    declaredLossy: { label: string; blurb: string };
     confidence: string;
   };
   /** Renders one piece of the verdict's evidence. Exhaustive over `Indicator["code"]` in
@@ -233,6 +234,10 @@ const fr: Dict = {
       label: "Indéterminé",
       blurb: "Pas assez d'éléments dans un sens ou dans l'autre. C'est une réponse à part entière, pas un échec."
     },
+    declaredLossy: {
+      label: "Format avec perte, annoncé",
+      blurb: "Ce fichier est dans un format avec perte et ne prétend pas le contraire. Il n'y a donc rien à démasquer — les mesures ci-dessous le décrivent quand même intégralement."
+    },
     confidence: "confiance"
   },
   indicator: (i) => {
@@ -263,6 +268,8 @@ const fr: Dict = {
         return `Les coefficients MDCT du fichier s'effondrent à un alignement de trame précis (décalage ${i.frame_offset}, ${fmtNumber(i.z_score, 0)} écarts-types au-dessus de ce que fait ce même fichier à tous les autres décalages) : ${fmtNumber(i.zero_percent, 1)} % des coefficients y sont annulés, contre ${fmtNumber(i.baseline_percent, 1)} % ailleurs. C'est la grille de quantification d'un encodeur AAC. De l'audio sans perte n'a aucun alignement de ce genre.`;
       case "mdct_grid_clear":
         return "Le balayage de la grille MDCT n'a trouvé aucun alignement d'encodeur, ce qui écarte une source AAC — y compris aux réglages transparents qu'une mesure spectrale ne peut pas voir. Cela ne dit rien du MP3, dont le banc de filtres hybride n'est pas inversible par cette méthode : le point aveugle se rétrécit, il ne se referme pas.";
+      case "declared_lossy_codec":
+        return `Ce fichier est en ${i.codec.toUpperCase()}, un format avec perte. Il ne se fait pas passer pour autre chose : il n'y a donc pas de transcodage à détecter, et la question à laquelle ce verdict répond — un conteneur sans perte cache-t-il de l'audio avec perte — ne s'applique pas. Toutes les mesures ci-dessous décrivent malgré tout le fichier fidèlement, y compris le passe-bas et la grille de trames de son propre encodeur.`;
       case "bandwidth_above_cd_ceiling":
         return `Le contenu monte jusqu'à ${fmtNumber(i.cutoff_khz, 1)} kHz, au-dessus du plafond de 22,05 kHz que peut porter n'importe quelle source à la fréquence du CD. Cela écarte le chemin de transcodage le plus courant par la mesure, et non par absence de preuve.`;
     }
@@ -439,6 +446,10 @@ const en: Dict = {
     indeterminate: {
       label: "Inconclusive",
       blurb: "Not enough evidence either way. That is a real answer, not a failure."
+    },
+    declaredLossy: {
+      label: "Lossy, and says so",
+      blurb: "This file is in a lossy format and is not pretending otherwise, so there is nothing to see through. The measurements below still describe it in full."
     },
     confidence: "confidence"
   },

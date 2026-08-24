@@ -364,7 +364,7 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
 
         let grid = analyze_mdct_grid(&decoded);
         let assessment =
-            assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches, &grid);
+            assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches, &grid, &decoded.codec_short_name);
         eprintln!(
             "{}: verdict = {:?}, confidence = {:.2}, actually_transcoded = {}",
             fx.filename, assessment.verdict, assessment.confidence_score, fx.is_actually_transcoded
@@ -475,7 +475,7 @@ fn a_pure_sine_is_never_reported_as_transcoded() {
     let spectral = analyze_spectrum(&decoded).expect("spectral analysis should succeed");
     let grid = analyze_mdct_grid(&decoded);
     let assessment =
-        assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches, &grid);
+        assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches, &grid, &decoded.codec_short_name);
 
     assert_eq!(
         spectral.rolloff_steepness_db_per_khz, 0.0,
