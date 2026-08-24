@@ -20,6 +20,13 @@ releases start shipping.
 
 ### Modifié
 
+- **Vue de comparaison restructurée.** Le tableau de mesures est désormais groupé en trois
+  sections (ce que le fichier annonce / ce que le spectre montre / mastering) plutôt qu'une
+  liste plate de onze lignes. Les spectrogrammes passent en pleine largeur et empilés : c'est
+  une image large, et les empiler aligne les deux axes de fréquence sur la même verticale —
+  pour comparer où le contenu s'arrête, on regarde droit vers le bas au lieu de traverser un
+  écart. Les grilles MDCT restent côte à côte : elles sont petites et toute la lecture tient
+  en « l'une a un pic, l'autre non ».
 - **Builds de développement optimisés.** Le balayage MDCT s'effondre sans optimisation : une
   piste de 5 minutes prenait **55 s** sous `tauri dev` contre moins d'une seconde en release,
   ce qui rendait l'app de dev inutilisable pour son propre usage et le test de corpus
@@ -65,6 +72,7 @@ releases start shipping.
 ### Corrigé
 
 - La légende du spectrogramme (« Quiet »/« Loud ») était restée en anglais.
+
 
 ## [0.3.0] - 2026-08-21
 

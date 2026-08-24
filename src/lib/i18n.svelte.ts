@@ -175,6 +175,9 @@ interface Dict {
     metric: string;
     note: string;
     loading: string;
+    groupDeclared: string;
+    groupSpectrum: string;
+    groupMastering: string;
   };
   disclaimer: string;
   player: { play: string; pause: string; playbackPosition: string; mute: string; unmute: string; volume: string };
@@ -378,7 +381,10 @@ const fr: Dict = {
     exit: "Fermer la comparaison",
     metric: "Mesure",
     note: "Les lignes où les deux fichiers diffèrent sont mises en avant. Là où « mieux » a un sens sans ambiguïté — bande passante, plage dynamique, échantillons écrêtés, grille MDCT — le côté qui mène est signalé. Ailleurs les deux valeurs sont simplement posées côte à côte : arbitrer entre un spectre plus large et un master plus fort demanderait une pondération que cet outil n'a aucune base pour établir.",
-    loading: "Analyse du second fichier…"
+    loading: "Analyse du second fichier…",
+    groupDeclared: "Ce que le fichier annonce",
+    groupSpectrum: "Ce que le spectre montre",
+    groupMastering: "Mastering"
   },
   disclaimer:
     "Nyquist rapporte ce qu'il peut mesurer et le dit clairement quand ce n'est pas suffisant. Le verdict de transcodage repose surtout sur la forme de la pente spectrale, qui ne peut pas détecter un encodage transparent comme LAME V0 ou AAC 256 — un résultat propre n'est pas une preuve de provenance.",
@@ -561,7 +567,10 @@ const en: Dict = {
     exit: "Close comparison",
     metric: "Measurement",
     note: "Rows where the two files disagree are brought forward. Where \"better\" is unambiguous — bandwidth, dynamic range, clipped samples, MDCT grid — the leading side is marked. Everywhere else the two values are simply placed side by side: choosing between a wider spectrum and a louder master would need a weighting this tool has no basis to set.",
-    loading: "Analyzing the second file…"
+    loading: "Analyzing the second file…",
+    groupDeclared: "What the file claims",
+    groupSpectrum: "What the spectrum shows",
+    groupMastering: "Mastering"
   },
   disclaimer:
     "Nyquist reports what it can measure and says so when that is not enough. The transcode verdict rests mainly on the shape of the spectral rolloff, which cannot see a transparent encode such as LAME V0 or AAC 256 — a clean result is not proof of provenance.",
