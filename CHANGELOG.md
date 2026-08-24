@@ -8,6 +8,14 @@ releases start shipping.
 
 ### Corrigé
 
+- **Les boutons de la barre du haut avaient doublé de taille.** `.ghost` était défini dans le
+  `<style>` scopé de la page, donc Svelte le compilait avec une spécificité qui battait le
+  reset `button { font: inherit }` juste au-dessus. En le passant en global pour que les
+  composants enfants puissent s'en servir, il est repassé sous ce reset et les boutons ont
+  hérité de la police du body, à sa taille. Le reset est global lui aussi maintenant : la
+  spécificité tranche, plus l'ordre des règles.
+- Le bouton de fermeture de la comparaison n'avait littéralement aucun style, pour la même
+  raison — c'était un `<button>` HTML brut.
 - **Un MP3 n'est plus accusé de transcodage.** Le verdict de cet outil répond à une question
   précise : « ce fichier *sans perte* cache-t-il de l'audio avec perte ? » La poser sur un
   MP3 est une erreur de catégorie, et elle produisait une réponse absurde — un MP3 ordinaire
@@ -20,13 +28,23 @@ releases start shipping.
 
 ### Modifié
 
-- **Vue de comparaison restructurée.** Le tableau de mesures est désormais groupé en trois
-  sections (ce que le fichier annonce / ce que le spectre montre / mastering) plutôt qu'une
-  liste plate de onze lignes. Les spectrogrammes passent en pleine largeur et empilés : c'est
-  une image large, et les empiler aligne les deux axes de fréquence sur la même verticale —
-  pour comparer où le contenu s'arrête, on regarde droit vers le bas au lieu de traverser un
-  écart. Les grilles MDCT restent côte à côte : elles sont petites et toute la lecture tient
-  en « l'une a un pic, l'autre non ».
+- **Vue de comparaison complétée et restructurée.** Elle ne montrait qu'un sous-ensemble des
+  mesures ; sonie, dynamique, détail spectral et image stéréo y sont désormais présents. Le
+  tableau est groupé en cinq sections plutôt qu'une liste plate, les spectrogrammes sont côte
+  à côte (et ne s'empilent que sous 700 px, bien en dessous des 1000 px par défaut de la
+  fenêtre), et les grilles MDCT restent alignées côte à côte.
+- **Niveaux par bande en profil de colonnes** plutôt qu'en huit lignes empilées. Ces niveaux
+  sont une *courbe* — où l'énergie se situe et où elle s'arrête — et une liste demande au
+  lecteur de la reconstituer mentalement. La valeur en dB est posée sur chaque bâton, au-
+  dessus ou à l'intérieur selon la place disponible. Bénéfice secondaire : la carte « Détail
+  spectral » cesse de dépasser d'une tête sa voisine.
+- **Cartes appairées de même hauteur.** Elles s'étirent désormais l'une sur l'autre, et la
+  note de bas de carte est ancrée en bas : la hauteur qu'une carte gagne de sa voisine
+  atterrit entre le contenu et la note, où elle se lit comme de l'espacement plutôt que comme
+  un bloc vide.
+- Le mètre de corrélation L/R prend une teinte progressive de gauche à droite. Réservé à ce
+  mètre, où la distance parcourue *est* la lecture : des canaux proches et des canaux quasi
+  identiques diffèrent en nature, pas seulement en longueur.
 - **Builds de développement optimisés.** Le balayage MDCT s'effondre sans optimisation : une
   piste de 5 minutes prenait **55 s** sous `tauri dev` contre moins d'une seconde en release,
   ce qui rendait l'app de dev inutilisable pour son propre usage et le test de corpus
