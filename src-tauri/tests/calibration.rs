@@ -9,7 +9,9 @@ use nyquist_lib::dynamic_range::compute_dr14;
 use nyquist_lib::signal_analysis::analyze_signal;
 
 fn fixture(name: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/corpus/calibration").join(name)
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/corpus/calibration")
+        .join(name)
 }
 
 /// For any sine wave, RMS = peak / sqrt(2), i.e. RMS sits ~3.0103 dB below peak
@@ -31,7 +33,14 @@ fn sine_1khz_minus3dbfs_matches_known_rms() {
         "expected RMS ~= -6.01 dBFS (peak - 3.0103dB for a sine wave), got {}",
         signal.rms_dbfs
     );
-    assert_eq!(signal.clipping_count_total, 0, "a -3dBFS sine should never clip");
+    assert_eq!(
+        signal.full_scale_sample_count_total, 0,
+        "a -3dBFS sine never touches the rail"
+    );
+    assert_eq!(
+        signal.clipped_run_count_total, 0,
+        "a -3dBFS sine should never clip"
+    );
 }
 
 /// DR14's per-block RMS formula (sqrt(2 * mean(x^2)), see dynamic_range.rs module docs)
@@ -50,6 +59,9 @@ fn sine_1khz_has_near_zero_dr14() {
     assert_eq!(dr.dr14, Some(0), "a stationary sine should round to DR0");
     for (ch, value) in dr.per_channel_db.iter().enumerate() {
         let v = value.unwrap_or_else(|| panic!("channel {ch}: expected a measurable DR value"));
-        assert!(v.abs() < 0.01, "channel {ch}: expected DR ~= 0.0 dB, got {v}");
+        assert!(
+            v.abs() < 0.01,
+            "channel {ch}: expected DR ~= 0.0 dB, got {v}"
+        );
     }
 }

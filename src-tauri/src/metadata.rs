@@ -6,7 +6,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
-use crate::decode::DecodedAudio;
+use crate::decode::{DecodeStatus, DecodedAudio};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -27,9 +27,10 @@ pub struct FileInfo {
     /// STREAMINFO MD5). `Some(false)`: mismatch — the file is corrupt/truncated/edited.
     /// `None`: this codec has no such embedded checksum (MP3, AAC, WAV, ...).
     pub integrity_verified: Option<bool>,
-    /// Packets that failed to decode and were skipped. Non-zero means every measurement
-    /// in this report describes damaged, incomplete audio — see `decode.rs`.
-    pub decode_errors: usize,
+    /// Whether the whole stream reached the analysis. Anything but `complete` means every
+    /// measurement in this report describes a shorter, gap-ridden version of the track —
+    /// see `decode.rs`.
+    pub decode_status: DecodeStatus,
 }
 
 pub fn build_file_info(path: &Path, decoded: &DecodedAudio) -> Result<FileInfo, String> {
@@ -37,7 +38,11 @@ pub fn build_file_info(path: &Path, decoded: &DecodedAudio) -> Result<FileInfo, 
         .map_err(|e| format!("cannot read file metadata: {e}"))?
         .len();
 
-    let sample_count = decoded.channel_samples.first().map(|c| c.len()).unwrap_or(0);
+    let sample_count = decoded
+        .channel_samples
+        .first()
+        .map(|c| c.len())
+        .unwrap_or(0);
     let duration_seconds = if decoded.sample_rate > 0 {
         sample_count as f64 / decoded.sample_rate as f64
     } else {
@@ -51,7 +56,10 @@ pub fn build_file_info(path: &Path, decoded: &DecodedAudio) -> Result<FileInfo, 
     };
 
     Ok(FileInfo {
-        filename: path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
+        filename: path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default(),
         container: decoded.container_short_name.clone(),
         codec: decoded.codec_short_name.clone(),
         sample_rate_hz: decoded.sample_rate,
@@ -63,6 +71,6 @@ pub fn build_file_info(path: &Path, decoded: &DecodedAudio) -> Result<FileInfo, 
         sample_count,
         bitrate_kbps,
         integrity_verified: decoded.integrity_verified,
-        decode_errors: decoded.decode_errors,
+        decode_status: decoded.decode_status,
     })
 }

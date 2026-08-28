@@ -3,8 +3,22 @@
 //! this is the highest-stakes code in the project: a wrong verdict either discredits a
 //! legitimate file or vouches for a fake one.
 //!
-//! **Never a binary yes/no.** Always a 3-state verdict with a bounded, honest confidence
-//! score and a human-readable list of what evidence produced it.
+//! **Never a binary yes/no.** Always a 4-state verdict — `ProbablyAuthentic`,
+//! `ProbablyTranscoded`, `Indeterminate`, `DeclaredLossy` — with a bounded, honest
+//! confidence weight and a human-readable list of what evidence produced it.
+//!
+//! ## An absence of evidence is not evidence
+//!
+//! The distinction the rest of this module is organized around: finding no encoder
+//! fingerprint says the spectrum is clean, not that the file is lossless. `ProbablyAuthentic`
+//! therefore requires *positive* evidence — currently one thing, real content in the top of a
+//! hi-res band, which no CD-rate lossy encode could have put there. Everything else that
+//! comes back clean produces `Indeterminate`.
+//!
+//! That is a stronger constraint than it sounds, and it was added because the previous
+//! version returned `ProbablyAuthentic` at 0.65 for the two LAME V0 transcodes in this
+//! project's own corpus. Missing a transcode is a limit of the method; *vouching* for one is
+//! the tool telling the user a lie it was built to prevent.
 //!
 //! ## Why rolloff *steepness* is the primary signal, not cutoff *position*
 //!
@@ -29,7 +43,8 @@
 //! A transparent lossy encode does not reliably lowpass at all, so the rolloff measurement
 //! above cannot see one. That used to mean LAME V0 *and* AAC 256 came out
 //! `ProbablyAuthentic` — the tool vouching for a transcode rather than merely missing it,
-//! which is the worst thing it can do.
+//! which is the worst thing it can do. Both halves of that are now fixed: AAC by the grid
+//! sweep below, LAME V0 by the rule above that a clean sweep alone reaches no verdict.
 //!
 //! **The AAC half is now covered**, by `mdct_grid.rs`, which reads a different property
 //! entirely: an AAC encoder quantizes on a 1024-point MDCT, and re-analysing the decoded
@@ -60,6 +75,7 @@
 
 use serde::Serialize;
 
+use crate::decode::DecodeStatus;
 use crate::mdct_grid::MdctGridAnalysis;
 use crate::spectral::SpectralAnalysis;
 use crate::tags::EncoderTagMatch;
@@ -92,15 +108,24 @@ const STEEPNESS_TRANSCODE_THRESHOLD: f64 = 40.0;
 /// At or above this, confidence in a "transcoded" reading saturates. Real LAME cutoffs
 /// measured in this project's corpus after the recalibration above: ~90-94 dB/kHz.
 const STEEPNESS_CONFIDENT_THRESHOLD: f64 = 85.0;
-/// Confidence in "probably authentic" when the scan found no lowpass at all. Flat rather
-/// than scaled by bandwidth: the evidence is categorical (an edge was searched for and not
-/// found), and the ceiling is set by the known blind spot in the module docs, not by how
-/// much of Nyquist the content happens to occupy.
+/// Confidence in "probably authentic" once positive evidence has been found on top of a
+/// clean sweep. Flat rather than scaled by bandwidth: the evidence is categorical, and the
+/// ceiling is set by the known blind spot in the module docs, not by how much of Nyquist the
+/// content happens to occupy.
 ///
-/// The previous version scaled this by cutoff/Nyquist and required that ratio to reach 0.92.
+/// An earlier version scaled this by cutoff/Nyquist and required that ratio to reach 0.92.
 /// That silently made the branch unreachable for real music, whose peak-relative cutoff sits
 /// around 5 kHz, so every genuine lossless file fell through to `Indeterminate` at 30%.
-const NO_EDGE_CONFIDENCE: f64 = 0.6;
+const AUTHENTIC_BASE_CONFIDENCE: f64 = 0.6;
+/// Confidence attached to the `Indeterminate` verdict returned when the sweep found no
+/// encoder lowpass and nothing else positively vouched for the file.
+///
+/// Low on purpose, and the same number as the gradual-rolloff case, because it means the
+/// same thing: not enough was established to say. A clean sweep used to return
+/// `ProbablyAuthentic` at 0.65 here, which had the tool actively vouching for the two LAME
+/// V0 transcodes in this project's own corpus — the worst failure mode it has, since a
+/// transparent MP3 encode is precisely what this method cannot see. See "Known blind spot".
+const NO_EVIDENCE_CONFIDENCE: f64 = 0.3;
 /// Confidence when the MDCT grid fires on top of an already-"transcoded" spectral verdict.
 /// The two are structurally independent — one reads the envelope, the other the coefficient
 /// alignment — so agreement between them is worth more than either alone.
@@ -120,8 +145,9 @@ const GRID_ONLY_CONFIDENCE: f64 = 0.9;
 /// reward the half of the problem that was solved.
 const GRID_CLEAR_BONUS: f64 = 0.05;
 /// Ceiling on a "probably authentic" verdict however much corroboration accumulates. The
-/// verdict still rests on an absence of evidence, and the MP3 blind spot is still open.
-const NO_EDGE_MAX_CONFIDENCE: f64 = 0.7;
+/// verdict still rests in part on an absence of evidence, and the MP3 blind spot is still
+/// open.
+const AUTHENTIC_MAX_CONFIDENCE: f64 = 0.7;
 /// Added when content runs above the 22.05 kHz ceiling a CD-sourced lossy encode could
 /// carry. Independent of the grid sweep: no MP3 exists at a sample rate high enough to
 /// reach there, so that whole transcode path is ruled out by measurement rather than by
@@ -131,15 +157,21 @@ const ABOVE_CD_BANDWIDTH_BONUS: f64 = 0.05;
 /// Highest frequency any 44.1 kHz source can carry. Content above this cannot have come
 /// through a CD-rate lossy encode.
 const CD_NYQUIST_HZ: f64 = 22_050.0;
-/// How much of its declared bandwidth a file must actually use before content above
-/// [`CD_NYQUIST_HZ`] counts as evidence of a hi-res source.
+/// How loud the top of the declared band must be, relative to the 1 kHz-22.05 kHz reference
+/// band, before it counts as evidence of a genuine hi-res source. See
+/// `spectral::SpectralAnalysis::above_cd_ceiling_db` for exactly which band is measured.
 ///
-/// Without this the rule backfires on upsampled files. Resampling 44.1 kHz material to
-/// 96 kHz leaves an anti-imaging transition band that the wide bandwidth probe measures at
-/// around 25 kHz — above the CD ceiling, yet produced by a CD-rate source, which is exactly
-/// the inference the bonus is meant to license. Genuine hi-res fills its bandwidth
-/// (ratio ≈ 1.0); the corpus's upsampled fixture sits at 0.52.
-const HI_RES_BANDWIDTH_RATIO: f64 = 0.9;
+/// A ceiling test that only asked "does anything reach above 22.05 kHz" backfires on
+/// upsampled files: resampling 44.1 kHz material to 96 kHz leaves anti-imaging ringing up
+/// around 25 kHz — above the ceiling, yet produced by a CD-rate source, which is exactly the
+/// inference this is meant to license.
+///
+/// Measured on this project's corpus: genuine hi-res at -0.03 dB (full-band noise) and
+/// -18.6 dB (music-like), against -47.7 dB for the upsampled fixture and -64.2 dB for the
+/// upsampled transcode. Set to leave 11 dB of margin under the weaker genuine case and 18 dB
+/// over the stronger fake — and the gap is structural, not lucky: an upsampler's anti-imaging
+/// filter leaves the top of the new band empty by construction.
+const ABOVE_CD_CEILING_MIN_DB: f64 = -30.0;
 /// Lower bound of the scanned range, in kHz, quoted to the user so the claim states its own
 /// scope. Mirrors `spectral::MIN_PLAUSIBLE_ENCODER_CUTOFF_HZ`.
 const MIN_SCANNED_KHZ: f64 = 8.0;
@@ -177,10 +209,16 @@ fn is_declared_lossy(codec: &str) -> bool {
 #[serde(rename_all = "snake_case")]
 pub struct TranscodeAssessment {
     pub verdict: Verdict,
-    /// Confidence in the *stated* verdict, 0.0-1.0. Deliberately capped well below 1.0 in
-    /// every branch: this is a single-indicator, first-pass heuristic on a small corpus,
-    /// not a validated statistical classifier — see module docs.
-    pub confidence_score: f64,
+    /// Strength of the evidence behind the *stated* verdict, 0.0-1.0, or `None` where the
+    /// verdict is not an inference at all ([`Verdict::DeclaredLossy`] — the container says
+    /// so outright, and there is nothing to be more or less sure of).
+    ///
+    /// Deliberately capped well below 1.0 in every branch: this is a small set of
+    /// indicators tuned on a small corpus, not a validated statistical classifier — see
+    /// module docs. It is **not** a probability, and no surface should render it as one; the
+    /// UI shows it as weak/moderate/strong evidence and keeps the number for the JSON
+    /// report, where a reader can see what it is.
+    pub confidence_score: Option<f64>,
     /// Human-readable evidence, one entry per contributing observation. Always non-empty
     /// — a verdict with no stated indicators is not acceptable in this codebase.
     pub indicators: Vec<Indicator>,
@@ -206,7 +244,10 @@ pub struct Indicator {
 
 impl Indicator {
     fn new(detail: IndicatorDetail) -> Self {
-        Self { message: detail.english(), detail }
+        Self {
+            message: detail.english(),
+            detail,
+        }
     }
 }
 
@@ -228,8 +269,10 @@ pub enum IndicatorDetail {
         tag_key: String,
         tag_value: String,
         matched_pattern: String,
-        /// Further matching tags beyond the one quoted, 0 when it was the only one.
-        additional_matches: usize,
+        /// Further *tags* beyond the one quoted, 0 when it was the only one. Counted by
+        /// distinct `(key, value)` pair rather than by pattern hit: one tag naming an
+        /// encoder twice ("LAME 3.100 (lame)") is one piece of evidence, not two.
+        additional_tags: usize,
     },
     /// Caveat attached when the spectrum was inconclusive and the tag carries the verdict.
     TagIsOnlyEvidence,
@@ -238,22 +281,42 @@ pub enum IndicatorDetail {
     /// Degenerate input: no usable sample rate, so no spectral claim can be made.
     InvalidSampleRate,
     /// A rolloff steep enough to read as a codec's lowpass rather than mix/mastering.
-    SharpRolloff { steepness_db_per_khz: f64, edge_khz: f64 },
+    SharpRolloff {
+        steepness_db_per_khz: f64,
+        edge_khz: f64,
+    },
     /// The scan ran the whole plausible encoder range and found no lowpass anywhere.
-    NoEncoderLowpass { scanned_from_khz: f64, nyquist_khz: f64 },
+    NoEncoderLowpass {
+        scanned_from_khz: f64,
+        nyquist_khz: f64,
+    },
     /// The blind spot from the module docs, stated alongside every "authentic" verdict.
     TransparentEncodeUnseen,
     /// An edge exists but is too gradual to attribute to a codec either way.
-    GradualRolloff { cutoff_khz: f64, steepness_db_per_khz: f64 },
+    GradualRolloff {
+        cutoff_khz: f64,
+        steepness_db_per_khz: f64,
+    },
     /// The file's own MDCT coefficients collapse at one specific frame alignment — an AAC
     /// encoder's grid. Structural evidence, independent of the spectral envelope.
-    MdctGridAligned { z_score: f64, frame_offset: usize, zero_percent: f64, baseline_percent: f64 },
+    MdctGridAligned {
+        z_score: f64,
+        frame_offset: usize,
+        zero_percent: f64,
+        baseline_percent: f64,
+    },
     /// The grid sweep ran and found no alignment: AAC is ruled out, MP3 is not.
     MdctGridClear,
-    /// Content runs above the ceiling any CD-rate lossy encode could carry.
-    BandwidthAboveCdCeiling { cutoff_khz: f64 },
+    /// The band above the CD ceiling carries real content, which no CD-rate lossy encode
+    /// could have put there.
+    ContentAboveCdCeiling { level_db: f64, ceiling_khz: f64 },
     /// The container declares a lossy codec, so there is no disguise to see through.
     DeclaredLossyCodec { codec: String },
+    /// Part of the audio never reached the analysis, so no verdict can describe the file.
+    DecodeIncomplete {
+        skipped_packets: usize,
+        stopped_early: bool,
+    },
 }
 
 impl IndicatorDetail {
@@ -261,14 +324,21 @@ impl IndicatorDetail {
     /// the CLI, the JSON export and the English UI all end up rendering this exact string.
     fn english(&self) -> String {
         match self {
-            Self::EncoderTagMatched { tag_key, tag_value, matched_pattern, additional_matches } => {
+            Self::EncoderTagMatched {
+                tag_key,
+                tag_value,
+                matched_pattern,
+                additional_tags,
+            } => {
                 format!(
-                    "Encoder tag \"{}\" reads \"{}\", matching the lossy-only encoder \"{}\"{}.",
+                    "Encoder tag \"{}\" reads \"{}\", matching the lossy-only encoder \"{}\"{}. \
+                     Note that tags stored at the end of a file (ID3v1, APEv2) are not read, \
+                     so an absent tag is not evidence either way.",
                     tag_key,
                     tag_value,
                     matched_pattern,
-                    if *additional_matches > 0 {
-                        format!(", plus {additional_matches} more matching tag(s)")
+                    if *additional_tags > 0 {
+                        format!(", plus {additional_tags} more matching tag(s)")
                     } else {
                         String::new()
                     }
@@ -287,24 +357,37 @@ impl IndicatorDetail {
             Self::InvalidSampleRate => {
                 "Invalid sample rate; cannot evaluate spectral content.".to_string()
             }
-            Self::SharpRolloff { steepness_db_per_khz, edge_khz } => format!(
+            Self::SharpRolloff {
+                steepness_db_per_khz,
+                edge_khz,
+            } => format!(
                 "Sharp spectral rolloff (~{steepness_db_per_khz:.0} dB/kHz) around \
                  {edge_khz:.1} kHz — steep enough to match a lossy encoder's lowpass filter \
                  rather than natural mix/mastering content (natural rolloff measured well \
                  under 20 dB/kHz across this project's test corpus, real and synthetic)."
             ),
-            Self::NoEncoderLowpass { scanned_from_khz, nyquist_khz } => format!(
+            Self::NoEncoderLowpass {
+                scanned_from_khz,
+                nyquist_khz,
+            } => format!(
                 "No encoder lowpass found: the spectrum was scanned from \
                  {scanned_from_khz:.0} kHz to the {nyquist_khz:.1} kHz Nyquist frequency and \
                  no point showed the sharp drop into a sustained empty band that a lossy \
                  codec leaves behind."
             ),
-            Self::TransparentEncodeUnseen => "This does not rule out a transparent lossy \
-                 encode (e.g. LAME V0, AAC 256kbps) — this project's own corpus shows those \
-                 measuring indistinguishable from lossless by this method. Confidence is \
-                 capped accordingly."
+            Self::TransparentEncodeUnseen => "That is not evidence of authenticity. A \
+                 transparent lossy encode (e.g. LAME V0) does not lowpass at all, and this \
+                 project's own corpus shows those measuring indistinguishable from lossless \
+                 by this method — so an absent cutoff is equally consistent with a careful \
+                 MP3 transcode. No indicator of transcoding was detected; that is a \
+                 different statement from the file being lossless."
                 .to_string(),
-            Self::MdctGridAligned { z_score, frame_offset, zero_percent, baseline_percent } => format!(
+            Self::MdctGridAligned {
+                z_score,
+                frame_offset,
+                zero_percent,
+                baseline_percent,
+            } => format!(
                 "The file's own MDCT coefficients collapse at one specific frame alignment \
                  (offset {frame_offset}, {z_score:.0} standard deviations above this file's \
                  own behaviour at every other offset): {zero_percent:.1}% of coefficients \
@@ -324,12 +407,41 @@ impl IndicatorDetail {
                  including the encoder's own lowpass and frame grid.",
                 codec.to_uppercase()
             ),
-            Self::BandwidthAboveCdCeiling { cutoff_khz } => format!(
-                "Content runs to {cutoff_khz:.1} kHz, above the 22.05 kHz ceiling any \
-                 CD-rate source could carry. This rules out the most common transcode path \
-                 by measurement rather than by absence of evidence."
+            Self::ContentAboveCdCeiling {
+                level_db,
+                ceiling_khz,
+            } => format!(
+                "The band above {ceiling_khz:.2} kHz carries real content — {level_db:.0} dB \
+                 relative to the band below it. No MP3 or other CD-rate lossy encode exists \
+                 at a sample rate high enough to put it there, so that whole transcode path \
+                 is ruled out by measurement rather than by absence of evidence. This is the \
+                 only positive evidence of authenticity in this report."
             ),
-            Self::GradualRolloff { cutoff_khz, steepness_db_per_khz } => format!(
+            Self::DecodeIncomplete {
+                skipped_packets,
+                stopped_early,
+            } => {
+                let what = match (*skipped_packets, *stopped_early) {
+                    (0, _) => "the stream asked to be restarted part-way through (chained \
+                               segments or a format change) and decoding stopped there"
+                        .to_string(),
+                    (n, false) => format!("{n} packet(s) could not be decoded and were skipped"),
+                    (n, true) => format!(
+                        "{n} packet(s) could not be decoded and were skipped, and the stream \
+                         then asked to be restarted part-way through and decoding stopped there"
+                    ),
+                };
+                format!(
+                    "Part of the audio never reached the analysis: {what}. Every measurement \
+                     below describes only the portion that decoded, so no verdict about the \
+                     file as a whole can be given. Repair or re-rip the file and analyse it \
+                     again."
+                )
+            }
+            Self::GradualRolloff {
+                cutoff_khz,
+                steepness_db_per_khz,
+            } => format!(
                 "Content stops around {cutoff_khz:.1} kHz, but the transition there is \
                  gradual (~{steepness_db_per_khz:.0} dB/kHz) rather than the near-vertical \
                  wall a codec produces. That is consistent with a deliberately dark master, \
@@ -340,12 +452,29 @@ impl IndicatorDetail {
     }
 }
 
+/// What the spectral pass established, carried alongside the verdict so later evidence can
+/// tell "the sweep ran and found no lowpass" from "nothing could be established".
+///
+/// The two both produce `Indeterminate` now, and they must not be treated alike: a residual
+/// encoder tag on a file whose spectrum positively shows no lowpass is a *conflict*, while
+/// the same tag on a file the spectrum could say nothing about is the only evidence there is.
+#[derive(PartialEq, Clone, Copy)]
+enum SpectralOutcome {
+    /// The sweep ran the whole plausible range and found no encoder lowpass.
+    NoLowpass,
+    /// An edge was found, steep enough to be a codec's.
+    CodecLowpass,
+    /// A gradual edge, or a sample rate that makes the question meaningless.
+    Inconclusive,
+}
+
 pub fn assess_transcode_risk(
     spectral: &SpectralAnalysis,
     nyquist_hz: f64,
     encoder_tag_matches: &[EncoderTagMatch],
     mdct_grid: &MdctGridAnalysis,
     codec: &str,
+    decode_status: &DecodeStatus,
 ) -> TranscodeAssessment {
     // Short-circuit before any of the evidence below is weighed. None of it is *wrong* on a
     // lossy file — a lowpass and an encoder grid really are there — but all of it would be
@@ -353,20 +482,45 @@ pub fn assess_transcode_risk(
     if is_declared_lossy(codec) {
         return TranscodeAssessment {
             verdict: Verdict::DeclaredLossy,
-            // Not an inference, so not a probability. The container states this outright, and
-            // the UI omits the percentage for this verdict rather than printing a confident
-            // 100% that would look like the same kind of claim as the other three.
-            confidence_score: 1.0,
+            // Not an inference, so not a probability: the container states this outright.
+            // `None` rather than a confident 1.0, which read as the same kind of claim the
+            // other three verdicts make and would have to be explained away in every
+            // surface that renders it.
+            confidence_score: None,
             indicators: vec![Indicator::new(IndicatorDetail::DeclaredLossyCodec {
                 codec: codec.to_string(),
             })],
         };
     }
 
-    let mut assessment = assess_from_spectrum(spectral, nyquist_hz);
-    apply_mdct_grid_evidence(&mut assessment, mdct_grid);
-    apply_tag_evidence(&mut assessment, encoder_tag_matches);
+    let (mut assessment, outcome) = assess_from_spectrum(spectral, nyquist_hz);
+    apply_mdct_grid_evidence(&mut assessment, outcome, mdct_grid);
+    apply_tag_evidence(&mut assessment, outcome, encoder_tag_matches);
+    withhold_on_incomplete_decode(&mut assessment, decode_status);
     assessment
+}
+
+/// A verdict describes a file. When part of the file never reached the decoder, the
+/// measurements describe a fragment, and a verdict drawn from them would be a claim about
+/// the whole made from a part.
+///
+/// Applied last, over every other line of evidence, and it only ever *removes* a claim: the
+/// measurements stay, stated as measurements, and the accusation or the endorsement is
+/// withdrawn. A truncated FLAC used to come out with an ordinary verdict at an ordinary
+/// confidence, with the damage visible only as a packet count in another section.
+fn withhold_on_incomplete_decode(assessment: &mut TranscodeAssessment, status: &DecodeStatus) {
+    if status.complete {
+        return;
+    }
+    assessment.verdict = Verdict::Indeterminate;
+    assessment.confidence_score = Some(NO_EVIDENCE_CONFIDENCE);
+    assessment.indicators.insert(
+        0,
+        Indicator::new(IndicatorDetail::DecodeIncomplete {
+            skipped_packets: status.skipped_packets,
+            stopped_early: status.stopped_early,
+        }),
+    );
 }
 
 /// The MDCT grid is the only indicator here allowed to overturn a spectral "authentic", and
@@ -382,48 +536,63 @@ pub fn assess_transcode_risk(
 ///
 /// A clean grid result is *weak* evidence the other way, and is scored as such: it rules out
 /// AAC, which is a real narrowing, but says nothing about LAME. See [`GRID_CLEAR_BONUS`].
-fn apply_mdct_grid_evidence(assessment: &mut TranscodeAssessment, grid: &MdctGridAnalysis) {
+fn apply_mdct_grid_evidence(
+    assessment: &mut TranscodeAssessment,
+    outcome: SpectralOutcome,
+    grid: &MdctGridAnalysis,
+) {
     if !grid.analyzed {
         return;
     }
 
     if grid.grid_detected {
-        assessment.indicators.push(Indicator::new(IndicatorDetail::MdctGridAligned {
-            z_score: grid.z_score,
-            frame_offset: grid.frame_offset,
-            zero_percent: grid.zero_fraction_at_offset * 100.0,
-            baseline_percent: grid.zero_fraction_baseline * 100.0,
-        }));
-        assessment.confidence_score = match assessment.verdict {
+        assessment
+            .indicators
+            .push(Indicator::new(IndicatorDetail::MdctGridAligned {
+                z_score: grid.z_score,
+                frame_offset: grid.frame_offset,
+                zero_percent: grid.zero_fraction_at_offset * 100.0,
+                baseline_percent: grid.zero_fraction_baseline * 100.0,
+            }));
+        assessment.confidence_score = Some(match assessment.verdict {
             // Two structurally independent signals agreeing: a lowpass in the envelope and a
             // frame grid in the coefficients.
-            Verdict::ProbablyTranscoded => {
-                assessment.confidence_score.max(GRID_CORROBORATED_CONFIDENCE)
-            }
+            Verdict::ProbablyTranscoded => assessment
+                .confidence_score
+                .unwrap_or(0.0)
+                .max(GRID_CORROBORATED_CONFIDENCE),
             _ => {
                 // The spectral branch may have attached the transparent-encode caveat, whose
-                // whole point is that confidence in *authenticity* is capped because this
-                // case cannot be seen. It just was seen, so leaving the sentence in would
-                // have the verdict argue against itself. The lowpass measurement itself
-                // stays: it is still true, and it is what explains why the envelope alone
-                // missed this file.
+                // whole point is that an absent cutoff proves nothing because this case
+                // cannot be seen. It just was seen, so leaving the sentence in would have the
+                // verdict argue against itself. The lowpass measurement itself stays: it is
+                // still true, and it is what explains why the envelope alone missed this file.
                 assessment
                     .indicators
                     .retain(|i| !matches!(i.detail, IndicatorDetail::TransparentEncodeUnseen));
                 assessment.verdict = Verdict::ProbablyTranscoded;
                 GRID_ONLY_CONFIDENCE
             }
-        };
+        });
         return;
     }
 
-    // Only worth stating where it changes something: on an "authentic" reading it narrows
-    // the known blind spot, which is the one place the user is being asked to trust an
-    // absence of evidence.
+    // Only worth stating where the user is being asked to weigh an absence: a clean sweep
+    // rules out AAC, which narrows the known blind spot to MP3. It is not enough on its own
+    // to move a verdict — LAME is at least as common a source of fake-lossless files — so on
+    // an `Indeterminate` it is stated and the verdict stands.
     if assessment.verdict == Verdict::ProbablyAuthentic {
-        assessment.indicators.push(Indicator::new(IndicatorDetail::MdctGridClear));
-        assessment.confidence_score =
-            (assessment.confidence_score + GRID_CLEAR_BONUS).min(NO_EDGE_MAX_CONFIDENCE);
+        assessment
+            .indicators
+            .push(Indicator::new(IndicatorDetail::MdctGridClear));
+        assessment.confidence_score = Some(
+            (assessment.confidence_score.unwrap_or(0.0) + GRID_CLEAR_BONUS)
+                .min(AUTHENTIC_MAX_CONFIDENCE),
+        );
+    } else if outcome == SpectralOutcome::NoLowpass {
+        assessment
+            .indicators
+            .push(Indicator::new(IndicatorDetail::MdctGridClear));
     }
 }
 
@@ -439,67 +608,111 @@ fn apply_mdct_grid_evidence(assessment: &mut TranscodeAssessment, grid: &MdctGri
 /// `Indeterminate` is for. Letting the tag win outright meant a stale encoder string
 /// silently converted a well-supported "probably authentic" into a 75%-confidence
 /// accusation.
-fn apply_tag_evidence(assessment: &mut TranscodeAssessment, matches: &[EncoderTagMatch]) {
+fn apply_tag_evidence(
+    assessment: &mut TranscodeAssessment,
+    outcome: SpectralOutcome,
+    matches: &[EncoderTagMatch],
+) {
     let Some(first) = matches.first() else { return };
 
-    assessment.indicators.push(Indicator::new(IndicatorDetail::EncoderTagMatched {
-        tag_key: first.tag_key.clone(),
-        tag_value: first.tag_value.clone(),
-        matched_pattern: first.matched_pattern.clone(),
-        additional_matches: matches.len() - 1,
-    }));
+    // Counted as *tags*, not as pattern hits. The scan tries every known encoder name
+    // against every tag, so one `ENCODER=LAME 3.100 (lame)` string used to produce two
+    // matches and report "plus 1 more matching tag" for a file that carried exactly one.
+    let distinct_tags = matches
+        .iter()
+        .map(|m| (m.tag_key.as_str(), m.tag_value.as_str()))
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
+
+    assessment
+        .indicators
+        .push(Indicator::new(IndicatorDetail::EncoderTagMatched {
+            tag_key: first.tag_key.clone(),
+            tag_value: first.tag_value.clone(),
+            matched_pattern: first.matched_pattern.clone(),
+            additional_tags: distinct_tags.saturating_sub(1),
+        }));
 
     match assessment.verdict {
         // Two independent signals agreeing is stronger than either alone.
         Verdict::ProbablyTranscoded => {
-            assessment.confidence_score =
-                assessment.confidence_score.max(TAG_MATCH_CORROBORATING_CONFIDENCE);
+            assessment.confidence_score = Some(
+                assessment
+                    .confidence_score
+                    .unwrap_or(0.0)
+                    .max(TAG_MATCH_CORROBORATING_CONFIDENCE),
+            );
         }
-        // Spectrum had nothing to say; the tag is then the only evidence there is.
+        // Direct conflict: the sweep positively established there is no encoder lowpass,
+        // and the metadata names a lossy tool. Whether the spectrum or the tag is stale, the
+        // honest answer is that they disagree — letting the tag win outright meant a
+        // leftover encoder string turned a clean measurement into a 75% accusation.
+        //
+        // Reached from `Indeterminate` as well as `ProbablyAuthentic` since a clean sweep on
+        // its own no longer vouches for a file; the conflict is with the *measurement*, not
+        // with the verdict it produced.
+        _ if outcome == SpectralOutcome::NoLowpass => {
+            assessment.verdict = Verdict::Indeterminate;
+            assessment.confidence_score = Some(TAG_CONFLICT_CONFIDENCE);
+            assessment
+                .indicators
+                .push(Indicator::new(IndicatorDetail::TagContradictsSpectrum));
+        }
+        // The spectrum could not settle it either way; the tag is then the only evidence
+        // there is, and it only ever points one direction.
         Verdict::Indeterminate => {
             assessment.verdict = Verdict::ProbablyTranscoded;
-            assessment.confidence_score = TAG_MATCH_ONLY_CONFIDENCE;
-            assessment.indicators.push(Indicator::new(IndicatorDetail::TagIsOnlyEvidence));
+            assessment.confidence_score = Some(TAG_MATCH_ONLY_CONFIDENCE);
+            assessment
+                .indicators
+                .push(Indicator::new(IndicatorDetail::TagIsOnlyEvidence));
         }
         // Unreachable: `assess_transcode_risk` returns before any evidence is applied when
         // the codec is lossy. Spelled out rather than folded into a catch-all so that adding
         // a fifth verdict is a compile error here instead of a silent fall-through.
         Verdict::DeclaredLossy => {}
-        // Direct conflict: measurement says full bandwidth, metadata says lossy tool.
-        Verdict::ProbablyAuthentic => {
-            assessment.verdict = Verdict::Indeterminate;
-            assessment.confidence_score = TAG_CONFLICT_CONFIDENCE;
-            assessment.indicators.push(Indicator::new(IndicatorDetail::TagContradictsSpectrum));
-        }
+        // `ProbablyAuthentic` is only reachable with `SpectralOutcome::NoLowpass`, which the
+        // conflict arm above already took.
+        Verdict::ProbablyAuthentic => {}
     }
 }
 
-fn assess_from_spectrum(spectral: &SpectralAnalysis, nyquist_hz: f64) -> TranscodeAssessment {
+fn assess_from_spectrum(
+    spectral: &SpectralAnalysis,
+    nyquist_hz: f64,
+) -> (TranscodeAssessment, SpectralOutcome) {
     if nyquist_hz <= 0.0 {
-        return TranscodeAssessment {
-            verdict: Verdict::Indeterminate,
-            confidence_score: 0.0,
-            indicators: vec![Indicator::new(IndicatorDetail::InvalidSampleRate)],
-        };
+        return (
+            TranscodeAssessment {
+                verdict: Verdict::Indeterminate,
+                confidence_score: Some(0.0),
+                indicators: vec![Indicator::new(IndicatorDetail::InvalidSampleRate)],
+            },
+            SpectralOutcome::Inconclusive,
+        );
     }
 
     let steepness = spectral.rolloff_steepness_db_per_khz;
     // Where the wall is, when there is one. Falls back to the measured bandwidth so the
     // wording still names a frequency in the degenerate case.
-    let edge_khz = spectral.encoder_edge_hz.unwrap_or(spectral.spectral_cutoff_hz) / 1000.0;
+    let measured_cutoff_hz = spectral.spectral_cutoff_hz.unwrap_or(nyquist_hz);
+    let edge_khz = spectral.encoder_edge_hz.unwrap_or(measured_cutoff_hz) / 1000.0;
 
     if steepness >= STEEPNESS_TRANSCODE_THRESHOLD {
         let strength = ((steepness - STEEPNESS_TRANSCODE_THRESHOLD)
             / (STEEPNESS_CONFIDENT_THRESHOLD - STEEPNESS_TRANSCODE_THRESHOLD))
             .clamp(0.0, 1.0);
-        return TranscodeAssessment {
-            verdict: Verdict::ProbablyTranscoded,
-            confidence_score: 0.5 + 0.3 * strength,
-            indicators: vec![Indicator::new(IndicatorDetail::SharpRolloff {
-                steepness_db_per_khz: steepness,
-                edge_khz,
-            })],
-        };
+        return (
+            TranscodeAssessment {
+                verdict: Verdict::ProbablyTranscoded,
+                confidence_score: Some(0.5 + 0.3 * strength),
+                indicators: vec![Indicator::new(IndicatorDetail::SharpRolloff {
+                    steepness_db_per_khz: steepness,
+                    edge_khz,
+                })],
+            },
+            SpectralOutcome::CodecLowpass,
+        );
     }
 
     // No edge survived the scan. `spectral.rs` sweeps the whole plausible encoder range and
@@ -518,36 +731,297 @@ fn assess_from_spectrum(spectral: &SpectralAnalysis, nyquist_hz: f64) -> Transco
             }),
             Indicator::new(IndicatorDetail::TransparentEncodeUnseen),
         ];
-        let mut confidence = NO_EDGE_CONFIDENCE;
 
-        // Content above the CD ceiling cannot have come through a 44.1 kHz lossy encode —
-        // no MP3 exists at a sample rate high enough to reach there. Unlike everything else
-        // in this branch, that is positive evidence rather than an absence of it, so it is
-        // stated separately instead of being folded into the base number.
-        let uses_declared_bandwidth =
-            nyquist_hz > 0.0 && spectral.spectral_cutoff_hz / nyquist_hz >= HI_RES_BANDWIDTH_RATIO;
-        if spectral.spectral_cutoff_hz > CD_NYQUIST_HZ && uses_declared_bandwidth {
-            indicators.push(Indicator::new(IndicatorDetail::BandwidthAboveCdCeiling {
-                cutoff_khz: spectral.spectral_cutoff_hz / 1000.0,
+        // Content above the CD ceiling cannot have come through a 44.1 kHz lossy encode — no
+        // MP3 exists at a sample rate high enough to reach there. This is the whole reason
+        // the branch can reach a verdict at all: it is positive evidence, measured, and it
+        // closes the MP3 blind spot for this one class of file rather than asking the user to
+        // trust an absence.
+        //
+        // Everything else here — no lowpass found, no AAC grid — rules things *out*. Ruling
+        // out is not vouching, and treating it as such is what had this branch returning
+        // `ProbablyAuthentic` at 0.65 for two real LAME V0 transcodes in this project's own
+        // corpus. A file with no positive evidence now comes back `Indeterminate`, which is
+        // the honest reading and, per the transcode-heuristic-validation skill, a legitimate
+        // result rather than a failure to fix.
+        let above_ceiling_db = spectral.above_cd_ceiling_db;
+
+        if above_ceiling_db.is_some_and(|db| db >= ABOVE_CD_CEILING_MIN_DB) {
+            indicators.push(Indicator::new(IndicatorDetail::ContentAboveCdCeiling {
+                level_db: above_ceiling_db.unwrap_or_default(),
+                ceiling_khz: CD_NYQUIST_HZ / 1000.0,
             }));
-            confidence = (confidence + ABOVE_CD_BANDWIDTH_BONUS).min(NO_EDGE_MAX_CONFIDENCE);
+            return (
+                TranscodeAssessment {
+                    verdict: Verdict::ProbablyAuthentic,
+                    confidence_score: Some(
+                        (AUTHENTIC_BASE_CONFIDENCE + ABOVE_CD_BANDWIDTH_BONUS)
+                            .min(AUTHENTIC_MAX_CONFIDENCE),
+                    ),
+                    indicators,
+                },
+                SpectralOutcome::NoLowpass,
+            );
         }
 
-        return TranscodeAssessment {
-            verdict: Verdict::ProbablyAuthentic,
-            confidence_score: confidence,
-            indicators,
-        };
+        return (
+            TranscodeAssessment {
+                verdict: Verdict::Indeterminate,
+                confidence_score: Some(NO_EVIDENCE_CONFIDENCE),
+                indicators,
+            },
+            SpectralOutcome::NoLowpass,
+        );
     }
 
     // An edge exists but is too gradual to attribute to a codec: a deliberately dark
     // master, a vinyl transfer, or a tape source can all end this way.
-    TranscodeAssessment {
-        verdict: Verdict::Indeterminate,
-        confidence_score: 0.3,
-        indicators: vec![Indicator::new(IndicatorDetail::GradualRolloff {
-            cutoff_khz: spectral.spectral_cutoff_hz / 1000.0,
-            steepness_db_per_khz: steepness,
-        })],
+    (
+        TranscodeAssessment {
+            verdict: Verdict::Indeterminate,
+            confidence_score: Some(NO_EVIDENCE_CONFIDENCE),
+            indicators: vec![Indicator::new(IndicatorDetail::GradualRolloff {
+                cutoff_khz: measured_cutoff_hz / 1000.0,
+                steepness_db_per_khz: steepness,
+            })],
+        },
+        SpectralOutcome::Inconclusive,
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::spectral::{BandLevel, SpectrogramData};
+
+    fn spectral(
+        encoder_edge_hz: Option<f64>,
+        steepness: f64,
+        cutoff: Option<f64>,
+    ) -> SpectralAnalysis {
+        SpectralAnalysis {
+            spectral_cutoff_hz: cutoff,
+            rolloff_steepness_db_per_khz: steepness,
+            encoder_edge_hz,
+            cutoff_over_time_hz: Vec::new(),
+            cutoff_stability_hz: 0.0,
+            band_levels_db: Vec::<BandLevel>::new(),
+            stopband_depth_db: None,
+            above_cd_ceiling_db: None,
+            spectrogram: SpectrogramData {
+                time_bin_count: 0,
+                frequency_bin_count: 0,
+                max_frequency_hz: 22_050.0,
+                duration_seconds: 0.0,
+                intensity_base64: String::new(),
+            },
+        }
+    }
+
+    fn clear_grid() -> MdctGridAnalysis {
+        MdctGridAnalysis {
+            analyzed: true,
+            grid_detected: false,
+            z_score: 1.0,
+            frame_offset: 0,
+            zero_fraction_at_offset: 0.1,
+            zero_fraction_baseline: 0.1,
+            sweep_profile_base64: String::new(),
+        }
+    }
+
+    fn complete() -> DecodeStatus {
+        DecodeStatus {
+            complete: true,
+            skipped_packets: 0,
+            stopped_early: false,
+            channels_unequal: false,
+        }
+    }
+
+    /// The failure this module's most important fix addresses: a clean spectral sweep is an
+    /// absence of evidence, and absence used to be returned as `ProbablyAuthentic` at 0.65 —
+    /// the tool vouching for the two real LAME V0 transcodes in its own corpus.
+    #[test]
+    fn a_clean_sweep_alone_no_longer_vouches_for_a_file() {
+        let assessment = assess_transcode_risk(
+            &spectral(None, 0.0, None),
+            22_050.0,
+            &[],
+            &clear_grid(),
+            "flac",
+            &complete(),
+        );
+        assert_eq!(assessment.verdict, Verdict::Indeterminate);
+        assert!(assessment
+            .indicators
+            .iter()
+            .any(|i| matches!(i.detail, IndicatorDetail::NoEncoderLowpass { .. })));
+    }
+
+    /// Positive evidence still reaches a verdict: content in the top of a hi-res band cannot
+    /// have come through a CD-rate lossy encode.
+    #[test]
+    fn measured_hi_res_content_supports_an_authentic_verdict() {
+        let mut sp = spectral(None, 0.0, None);
+        sp.above_cd_ceiling_db = Some(-5.0);
+        let assessment =
+            assess_transcode_risk(&sp, 48_000.0, &[], &clear_grid(), "flac", &complete());
+        assert_eq!(assessment.verdict, Verdict::ProbablyAuthentic);
+        assert!(assessment
+            .indicators
+            .iter()
+            .any(|i| matches!(i.detail, IndicatorDetail::ContentAboveCdCeiling { .. })));
+    }
+
+    /// An upsampled file has content above the ceiling too, but only ringing. It must not
+    /// clear the bar the measurement above sets.
+    #[test]
+    fn upsampled_ringing_does_not_support_an_authentic_verdict() {
+        let mut sp = spectral(None, 0.0, Some(25_000.0));
+        sp.above_cd_ceiling_db = Some(-47.7); // the corpus's upsampled fixture
+        let assessment =
+            assess_transcode_risk(&sp, 48_000.0, &[], &clear_grid(), "flac", &complete());
+        assert_eq!(assessment.verdict, Verdict::Indeterminate);
+    }
+
+    /// A tag naming a lossy encoder on a file the sweep found no lowpass in is a conflict,
+    /// not a confession. Letting the tag carry the verdict would turn a leftover encoder
+    /// string into an accusation — the reason `NoLowpass` is tracked separately from the
+    /// `Indeterminate` it now produces.
+    #[test]
+    fn a_stale_encoder_tag_over_a_clean_sweep_is_a_conflict() {
+        let tags = [EncoderTagMatch {
+            tag_key: "ENCODER".into(),
+            tag_value: "LAME 3.100".into(),
+            matched_pattern: "lame".into(),
+        }];
+        let assessment = assess_transcode_risk(
+            &spectral(None, 0.0, None),
+            22_050.0,
+            &tags,
+            &clear_grid(),
+            "flac",
+            &complete(),
+        );
+        assert_eq!(assessment.verdict, Verdict::Indeterminate);
+        assert_eq!(assessment.confidence_score, Some(TAG_CONFLICT_CONFIDENCE));
+        assert!(assessment
+            .indicators
+            .iter()
+            .any(|i| matches!(i.detail, IndicatorDetail::TagContradictsSpectrum)));
+    }
+
+    /// One tag matching two patterns is one piece of evidence. It used to be reported as
+    /// "plus 1 more matching tag" on a file carrying exactly one.
+    #[test]
+    fn repeated_patterns_in_one_tag_count_once() {
+        let tags = [
+            EncoderTagMatch {
+                tag_key: "ENCODER".into(),
+                tag_value: "LAME 3.100 (lame)".into(),
+                matched_pattern: "lame".into(),
+            },
+            EncoderTagMatch {
+                tag_key: "ENCODER".into(),
+                tag_value: "LAME 3.100 (lame)".into(),
+                matched_pattern: "lame3".into(),
+            },
+        ];
+        let assessment = assess_transcode_risk(
+            &spectral(Some(16_000.0), 90.0, Some(16_000.0)),
+            22_050.0,
+            &tags,
+            &clear_grid(),
+            "flac",
+            &complete(),
+        );
+        let additional = assessment.indicators.iter().find_map(|i| match i.detail {
+            IndicatorDetail::EncoderTagMatched {
+                additional_tags, ..
+            } => Some(additional_tags),
+            _ => None,
+        });
+        assert_eq!(
+            additional,
+            Some(0),
+            "two patterns in one tag is still one tag"
+        );
+    }
+
+    /// A verdict describes a file. When part of the file never decoded, there is no file to
+    /// describe — the measurements stand, the claim does not.
+    #[test]
+    fn an_incomplete_decode_withholds_the_verdict() {
+        let damaged = DecodeStatus {
+            complete: false,
+            skipped_packets: 12,
+            stopped_early: false,
+            channels_unequal: false,
+        };
+        let assessment = assess_transcode_risk(
+            // A spectrum that would otherwise read as an obvious transcode.
+            &spectral(Some(16_000.0), 95.0, Some(16_000.0)),
+            22_050.0,
+            &[],
+            &clear_grid(),
+            "flac",
+            &damaged,
+        );
+        assert_eq!(assessment.verdict, Verdict::Indeterminate);
+        assert!(matches!(
+            assessment.indicators.first().map(|i| &i.detail),
+            Some(IndicatorDetail::DecodeIncomplete {
+                skipped_packets: 12,
+                ..
+            })
+        ));
+        // The measurement itself is still reported — only the accusation is withdrawn.
+        assert!(assessment
+            .indicators
+            .iter()
+            .any(|i| matches!(i.detail, IndicatorDetail::SharpRolloff { .. })));
+    }
+
+    /// Channels of different lengths mean different sections of the report describe
+    /// different amounts of audio. That is a damaged file, and it withholds the verdict for
+    /// the same reason a skipped packet does.
+    #[test]
+    fn unequal_channel_lengths_withhold_the_verdict() {
+        let ragged = DecodeStatus {
+            complete: false,
+            skipped_packets: 0,
+            stopped_early: false,
+            channels_unequal: true,
+        };
+        let assessment = assess_transcode_risk(
+            &spectral(Some(16_000.0), 95.0, Some(16_000.0)),
+            22_050.0,
+            &[],
+            &clear_grid(),
+            "flac",
+            &ragged,
+        );
+        assert_eq!(assessment.verdict, Verdict::Indeterminate);
+        assert!(assessment
+            .indicators
+            .iter()
+            .any(|i| matches!(i.detail, IndicatorDetail::DecodeIncomplete { .. })));
+    }
+
+    /// A lossy container is not accused of hiding anything, and its verdict carries no
+    /// confidence figure — there is nothing to be more or less sure of.
+    #[test]
+    fn a_declared_lossy_file_carries_no_confidence_score() {
+        let assessment = assess_transcode_risk(
+            &spectral(Some(16_000.0), 95.0, Some(16_000.0)),
+            22_050.0,
+            &[],
+            &clear_grid(),
+            "mp3",
+            &complete(),
+        );
+        assert_eq!(assessment.verdict, Verdict::DeclaredLossy);
+        assert_eq!(assessment.confidence_score, None);
     }
 }

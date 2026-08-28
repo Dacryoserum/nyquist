@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use tauri::Manager;
 
 use crate::analysis::{self, AnalysisResult};
+use crate::player::{PlaybackState, Player};
 
 /// Decodes and analyzes an audio file.
 ///
@@ -17,19 +18,56 @@ use crate::analysis::{self, AnalysisResult};
 /// 7-minute 24-bit FLAC, see `.claude/CONTEXT.md` — well under the threshold that would
 /// justify it.
 #[tauri::command]
-pub async fn analyze_file(path: String) -> Result<AnalysisResult, String> {
-    tauri::async_runtime::spawn_blocking(move || analysis::analyze(&PathBuf::from(path)))
-        .await
-        .map_err(|e| format!("analysis task panicked: {e}"))?
+pub async fn analyze_file(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, String> {
+    let (result, decoded) = tauri::async_runtime::spawn_blocking(move || {
+        analysis::analyze_with_audio(&PathBuf::from(path))
+    })
+    .await
+    .map_err(|e| format!("analysis task panicked: {e}"))??;
+
+    // Playback is loaded from the very samples that produced the report, so the player's
+    // clock and the report's clock are the same clock — see player.rs on why that is the
+    // whole point. A machine with no audio output still gets its analysis: the load failure
+    // is swallowed here and surfaces as "no track loaded" on the next player call.
+    let player = app.state::<Player>();
+    player.unload();
+    let _ = player.load(decoded);
+
+    Ok(result)
 }
 
-/// Grants the webview's `asset://` protocol permission to read exactly this file, so the
-/// frontend can play it via a native `<audio>` element (streamed/seekable, never loaded
-/// whole into JS memory — see tauri-ipc-contract skill on payload size). Scope is per-file
-/// and additive; nothing else on disk becomes readable by calling this.
+/// Transport controls for the loaded track.
+///
+/// Each one returns the resulting [`PlaybackState`], so the UI never has to guess what an
+/// action did or issue a second call to find out. Position comes from the sample index handed
+/// to the audio device, which is why it cannot drift from what is being heard — the defect
+/// that motivated replacing the `<audio>` element.
 #[tauri::command]
-pub fn authorize_playback(app: tauri::AppHandle, path: String) -> Result<(), String> {
-    app.asset_protocol_scope().allow_file(&path).map_err(|e| format!("cannot authorize playback: {e}"))
+pub fn player_play(app: tauri::AppHandle) -> Result<PlaybackState, String> {
+    app.state::<Player>().play()
+}
+
+#[tauri::command]
+pub fn player_pause(app: tauri::AppHandle) -> Result<PlaybackState, String> {
+    app.state::<Player>().pause()
+}
+
+/// Seconds from the start of the track, in the same units as `file_info.duration_seconds`
+/// and the spectrogram's time axis. There is only one timeline now.
+#[tauri::command]
+pub fn player_seek(app: tauri::AppHandle, seconds: f64) -> Result<PlaybackState, String> {
+    app.state::<Player>().seek(seconds)
+}
+
+#[tauri::command]
+pub fn player_set_volume(app: tauri::AppHandle, volume: f32) -> Result<PlaybackState, String> {
+    app.state::<Player>().set_volume(volume)
+}
+
+/// Polled by the UI to drive the playhead. Cheap: a couple of atomic loads.
+#[tauri::command]
+pub fn player_state(app: tauri::AppHandle) -> Result<PlaybackState, String> {
+    app.state::<Player>().state()
 }
 
 /// Writes a pre-serialized report (the frontend's `AnalysisResult` as JSON, produced by

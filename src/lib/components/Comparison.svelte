@@ -15,7 +15,7 @@
   import MdctGrid from "$lib/components/MdctGrid.svelte";
   import Spectrogram from "$lib/components/Spectrogram.svelte";
   import { fmtNumber, t } from "$lib/i18n.svelte";
-  import type { AnalysisResult, Verdict } from "$lib/api";
+  import { evidenceStrength, type AnalysisResult, type Verdict } from "$lib/api";
   import type { IconName } from "$lib/icons";
 
   const T = $derived(t());
@@ -28,8 +28,9 @@
 
   const fmt = (v: number, d = 1) => fmtNumber(v, d);
   const fmtHz = (hz: number) => (hz >= 1000 ? `${fmtNumber(hz / 1000, 1)} kHz` : `${fmtNumber(hz, 0)} Hz`);
+  // `Math.floor`, not `Math.round`: rounding 59.6 s produced "0:60".
   const fmtDuration = (s: number) =>
-    `${Math.floor(s / 60)}:${Math.round(s % 60).toString().padStart(2, "0")}`;
+    `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, "0")}`;
   const na = () => T.loudness.na;
 
   /** Built per side, because the lossy label names the file's own codec. */
@@ -109,8 +110,10 @@
     const spectrum: Row[] = [
       {
         label: T.spectrum.bandwidth,
-        a: fmtHz(spa.spectral_cutoff_hz),
-        b: fmtHz(spb.spectral_cutoff_hz),
+        // `null` means nothing bounded the content, which is not a bandwidth and cannot be
+        // ranked against one — `lead` already returns nothing when either side is null.
+        a: spa.spectral_cutoff_hz !== null ? fmtHz(spa.spectral_cutoff_hz) : T.spectrum.noLimitMeasured,
+        b: spb.spectral_cutoff_hz !== null ? fmtHz(spb.spectral_cutoff_hz) : T.spectrum.noLimitMeasured,
         better: lead(spa.spectral_cutoff_hz, spb.spectral_cutoff_hz, 300)
       },
       {
@@ -176,10 +179,10 @@
         better: lead(a.dynamic_range.dr14, b.dynamic_range.dr14, 0.5)
       },
       {
-        label: T.dynamics.clippedSamples,
-        a: `${sa.clipping_count_total}`,
-        b: `${sb.clipping_count_total}`,
-        better: lead(sa.clipping_count_total, sb.clipping_count_total, 0, false)
+        label: T.dynamics.clippedRuns,
+        a: `${sa.clipped_run_count_total}`,
+        b: `${sb.clipped_run_count_total}`,
+        better: lead(sa.clipped_run_count_total, sb.clipped_run_count_total, 0, false)
       }
     ];
 
@@ -232,6 +235,10 @@
     </button>
   </header>
 
+  <!-- One player for two files is a deliberate choice (two unsynchronised transports is a
+       worse experience than one), but which file it holds was left implicit. -->
+  <p class="now-playing">{T.compare.nowPlaying(a.file_info.filename)}</p>
+
   <div class="verdicts">
     {#each [{ r: a, side: "A" }, { r: b, side: "B" }] as entry (entry.side)}
       {@const vm = verdictMetaFor(entry.r)[entry.r.transcode_assessment.verdict]}
@@ -241,14 +248,24 @@
         <div class="verdict-line">
           <Icon name={vm.icon} size={20} />
           <span class="label">{vm.label}</span>
-          {#if entry.r.transcode_assessment.verdict !== "declared_lossy"}
-            <span class="confidence">{fmt(entry.r.transcode_assessment.confidence_score * 100, 0)}%</span>
+          {#if entry.r.transcode_assessment.confidence_score !== null}
+            <span class="confidence">
+              {T.verdict.strength[evidenceStrength(entry.r.transcode_assessment.confidence_score)]}
+            </span>
           {/if}
         </div>
+        <!-- A verdict with no stated evidence is not acceptable anywhere else in this app,
+             and this view was the one place it appeared without any. -->
+        <ul class="evidence">
+          {#each entry.r.transcode_assessment.indicators.slice(0, 3) as indicator (indicator.code)}
+            <li>{T.indicator(indicator)}</li>
+          {/each}
+        </ul>
       </article>
     {/each}
   </div>
 
+  <div class="table-scroll">
   <table class="delta">
     <thead>
       <tr>
@@ -265,13 +282,23 @@
         {#each group.rows as row (row.label)}
           <tr class:differs={row.a !== row.b}>
             <th scope="row">{row.label}</th>
-            <td class:leads={row.better === "a"}>{row.a}</td>
-            <td class:leads={row.better === "b"}>{row.b}</td>
+            <!-- The marker and its label, not colour alone: the lead was previously encoded
+                 only as a text colour, which no screen reader announces and which a
+                 red-green colour deficiency does not separate from the other side. -->
+            <td class:leads={row.better === "a"}>
+              {row.a}{#if row.better === "a"}<span class="lead-mark" title={T.compare.leads}>▲<span
+                    class="sr-only">{T.compare.leads}</span></span>{/if}
+            </td>
+            <td class:leads={row.better === "b"}>
+              {row.b}{#if row.better === "b"}<span class="lead-mark" title={T.compare.leads}>▲<span
+                    class="sr-only">{T.compare.leads}</span></span>{/if}
+            </td>
           </tr>
         {/each}
       </tbody>
     {/each}
   </table>
+  </div>
   <p class="note">{T.compare.note}</p>
 
   <!-- Side by side, because comparing two pictures means seeing both at once. They fall to
@@ -283,7 +310,7 @@
         <span class="panel-label">{entry.side} — {entry.r.file_info.filename}</span>
         <Spectrogram
           data={entry.r.spectral_analysis.spectrogram}
-          spectralCutoffHz={entry.r.spectral_analysis.spectral_cutoff_hz}
+          spectralCutoffHz={entry.r.spectral_analysis.spectral_cutoff_hz ?? undefined}
           cutoffOverTimeHz={entry.r.spectral_analysis.cutoff_over_time_hz}
           showPalette={false}
         />
@@ -304,6 +331,51 @@
 </section>
 
 <style>
+  /* The delta table has three columns of prose and no room to shed one; it scrolls inside
+     its own box rather than making the whole page scroll sideways. */
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .now-playing {
+    margin: 0 0 0.75rem;
+    font-size: 0.72rem;
+    letter-spacing: 0.02em;
+    color: var(--ink-low);
+  }
+
+  .evidence {
+    margin: 0.6rem 0 0;
+    padding: 0;
+    list-style: none;
+    display: grid;
+    gap: 0.35rem;
+    font-size: 0.72rem;
+    line-height: 1.45;
+    color: var(--ink-low);
+  }
+
+  .lead-mark {
+    margin-left: 0.3em;
+    font-size: 0.65em;
+    vertical-align: 0.15em;
+  }
+
+  /* Visible to assistive technology, not on screen: the marker above needs a name, and the
+     `title` attribute alone is not reliably announced. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
   .compare {
     display: flex;
     flex-direction: column;
@@ -339,14 +411,22 @@
   }
 
   /* Same three severity tints the main verdict uses, so a card means the same thing here
-     as it does on the single-file dashboard. */
+     as it does on the single-file dashboard.
+
+     Each one is declared twice: a plain colour first, then the mixed one. `color-mix` is
+     not in WKWebView before macOS 12, and this app declares support down to 10.15 — a
+     browser that cannot parse the second declaration keeps the first rather than dropping
+     the property and losing the card's border entirely. */
   .verdict-card.transcoded {
+    border-color: var(--bad);
     border-color: color-mix(in srgb, var(--bad) 45%, var(--ink-hair));
   }
   .verdict-card.authentic {
+    border-color: var(--ok);
     border-color: color-mix(in srgb, var(--ok) 40%, var(--ink-hair));
   }
   .verdict-card.indeterminate {
+    border-color: var(--warn);
     border-color: color-mix(in srgb, var(--warn) 40%, var(--ink-hair));
   }
   /* Neutral: this state is not a finding, so it gets no severity tint. */

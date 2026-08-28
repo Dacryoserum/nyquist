@@ -48,13 +48,25 @@ it off.
   below the bandwidth that rate exists to carry. The counterpart to bit-depth padding, and
   likewise reported separately from the transcode verdict: such a file is lossless end to
   end, so calling it "transcoded" would name the wrong defect.
-- Reports damaged packets that had to be skipped, so a corrupt file is never silently
-  analyzed as if it were whole.
-- Scores the likelihood of a lossy-to-lossless transcode from the above, always reported
-  as a **3-state, explainable verdict** (probably authentic / probably transcoded /
-  indeterminate) with bounded confidence and a human-readable list of what produced it —
-  never a flat yes/no, because natural treble-poor masters exist and false positives
-  matter more than missed detections.
+- Reports an incomplete decode — skipped packets, or a stream that stopped early — and
+  **withholds the transcode verdict** when one happens, so a corrupt file is never quietly
+  judged as if it were whole.
+- Scores the likelihood of a lossy-to-lossless transcode from the above, always reported as
+  a **4-state, explainable verdict** with a human-readable list of what produced it — never
+  a flat yes/no, because natural treble-poor masters exist and false positives matter more
+  than missed detections. The states are:
+  - **probably authentic** — positive evidence was measured that rules out a lossy source;
+  - **probably transcoded** — an encoder fingerprint was found;
+  - **inconclusive** — no sign of transcoding was found, which is *not* evidence of
+    authenticity. On a 44.1 kHz file with no detectable cutoff this is the expected and
+    honest answer, not a failure;
+  - **lossy format** — the file is an MP3/AAC/Opus and says so, so the question of a
+    disguise does not arise.
+
+  Evidence is reported as a weak/moderate/strong reading rather than a percentage: the
+  underlying weights are tuned on a twenty-fixture corpus, not calibrated against a held-out
+  validation set, and a percentage would claim a precision they do not have. The raw number
+  is still in the exported JSON.
 - Exports the full analysis as a JSON report.
 - Ships a headless CLI (`nyquist-cli`) for scripting/batch use, sharing the exact same
   analysis pipeline as the desktop app.
@@ -65,8 +77,13 @@ it off.
 Tauri (Rust backend + Svelte frontend, native webview). Rust core: `symphonia` for
 decoding, `rustfft` for spectral analysis, `ebur128` for LUFS/LRA/true peak, `rayon` for
 running the independent analysis stages concurrently. Playback uses the webview's native
-`<audio>` element via Tauri's `asset://` protocol, not a Rust audio crate. macOS first,
-Windows and Linux planned after V1.0.
+`rodio` (over `cpal`) for playback, fed directly from the samples the analysis already
+decoded — the webview plays nothing at all. Two earlier attempts went through the webview's
+`<audio>` element, over Tauri's `asset://` protocol and then over a loopback HTTP server;
+both kept the element's own idea of how long the file was, which disagreed with the
+decoder's and produced wrong seeks, a drifting counter and long tracks stopping early.
+There is one clock now: a sample index into the decoded track. macOS first, Windows and
+Linux planned after V1.0.
 
 ## Building from source
 
@@ -91,9 +108,12 @@ cargo clippy --all-targets -- -D warnings
 The headless CLI shares the exact analysis pipeline as the app:
 
 ```bash
-cargo run --release --bin nyquist-cli -- --json path/to/file.flac
-cargo run --release --bin nyquist-cli -- --timing path/to/file.flac   # per-stage profile
+cargo run --release -p nyquist-cli -- --json path/to/file.flac
+cargo run --release -p nyquist-cli -- --timing path/to/file.flac   # per-stage profile
 ```
+
+(`-p`, not `--bin`: the CLI is its own workspace member, and `--bin nyquist-cli` fails from
+the workspace root.)
 
 ## Installing a release build
 
@@ -112,9 +132,21 @@ for the detailed list.
 
 Ahead:
 - Remaining UI polish (session history).
-- Catching transparent lossy encodes (LAME V0, AAC 256kbps), which do not lowpass at all
-  and are therefore invisible to the spectral method — the main known gap, and one that
-  needs a different indicator rather than a threshold change.
+- Catching transparent **MP3** encodes (LAME V0), which do not lowpass at all and are
+  therefore invisible to the spectral method — the main known gap. Such a file comes out
+  *inconclusive*, never "probably authentic": the tool declines to vouch for what it cannot
+  see. The AAC half of this gap is closed, by the MDCT grid sweep in
+  `src-tauri/src/mdct_grid.rs`, which catches AAC 256 and AAC 128 across the corpus
+  including settings no spectral measurement can see. It cannot be extended to MP3, whose
+  hybrid filterbank a plain MDCT does not invert.
+
+  Two approaches have been implemented, measured and rejected against the corpus; both are
+  recorded with their numbers in `src-tauri/tests/fixtures/corpus/README.md` so the next
+  attempt starts from the results. The blocker turned out not to be the algorithm but the
+  corpus: it is built from noise, which is the material a perceptual encoder discards least,
+  so LAME V0 leaves no trace in it to detect. `tests/local_probe.rs` measures the statistics
+  a detector would need, against real music placed in the gitignored `corpus/local/`. That
+  measurement comes before any further implementation.
 - **V1.0** — Public macOS release (`.dmg`), notarization.
 - **V1.1+** — Windows. **V2.0+** — folder/library batch scanning (CLI already covers part
   of this), side-by-side file comparison, local history (SQLite).

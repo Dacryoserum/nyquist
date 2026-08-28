@@ -23,19 +23,32 @@ fonctionnalités "audiophile avancé", tous en place.** Décodage (symphonia), m
 RMS/peak/DR14/LUFS/LRA/true peak, vérification d'intégrité FLAC (MD5 embarqué), détection
 de bit-depth padding ("faux hi-res"), empreinte d'encodeur lossy dans les tags,
 spectrogramme FFT avec spectral cutoff + pente de rolloff + coupure dans le temps, scoring
-de transcodage 3 états, lecture audio native avec clic-pour-naviguer, export JSON, et un
+de transcodage 4 états, lecture audio native avec clic-pour-naviguer, export JSON, et un
 binaire CLI (`nyquist-cli`) pour l'usage scripté/batch. UI dashboard (thème sombre chaud,
 cartes, icônes, canvas spectrogramme + dégradé inferno) — validée visuellement et
 fonctionnellement en conditions réelles par l'utilisateur.
 
-**Le scoring V0.3 (transcodage lossy) reste délibérément conservateur** — signal principal :
-pente de rolloff (voir `transcode_detect.rs`), confiance plafonnée (≤0.9 avec empreinte de
-tag corroborante, ≤0.8 spectral seul, ≤0.6 authentique). Cross-validé contre des mesures
-ffmpeg indépendantes et, ponctuellement hors corpus versionné, contre de vrais FLACs
+**Le scoring de transcodage refuse désormais de conclure sans preuve positive.** Une absence
+d'indice retourne `Indeterminate`, pas `ProbablyAuthentic` : ne rien trouver n'est pas trouver
+que tout va bien, et l'ancienne règle cautionnait activement les deux transcodages LAME V0 du
+corpus. `ProbablyAuthentic` exige maintenant du contenu réel dans le haut d'une bande hi-res
+(`spectral::above_cd_ceiling_db`), qu'aucun encodage à la fréquence du CD n'aurait pu y
+mettre — donc en pratique seuls les fichiers 88,2 kHz et plus peuvent l'atteindre. Sur un
+44,1 kHz sans coupure détectable, « indéterminé » est la bonne réponse et il ne faut pas
+essayer de la « corriger ».
+
+Signal principal côté transcodé : pente de rolloff (voir `transcode_detect.rs`), confiance
+plafonnée (≤0.9 avec empreinte de tag corroborante, ≤0.8 spectral seul, ≤0.7 authentique).
+La confiance n'est **pas** une probabilité : l'UI et le CLI l'affichent en force d'indices
+(faible/modérée/forte), le nombre brut ne survit que dans le JSON. Cross-validé contre des
+mesures ffmpeg indépendantes et, ponctuellement hors corpus versionné, contre de vrais FLACs
 commerciaux retranscodés (a révélé que la *position* seule du cutoff est trompeuse sur de la
 musique réelle — voir `.claude/CONTEXT.md`). Rapport FP/FN sur le corpus
-(`tests/corpus_smoke.rs`) : **20 fixtures, 0 faux positif, 0 faux négatif inattendu, 2
-échecs documentés**.
+(`tests/corpus_smoke.rs`) : **20 fixtures, 0 faux positif, 0 faux négatif inattendu, 2 échecs
+documentés (LAME V0), 0 fichier transcodé cautionné**.
+
+Un décodage incomplet (paquets sautés, `ResetRequired`) suspend le verdict : les mesures
+restent, le jugement est retiré (`decode::DecodeStatus`).
 
 **Le point aveugle est à moitié fermé.** `mdct_grid.rs` détecte la grille de quantification
 d'un encodeur AAC en ré-analysant le signal décodé au décalage de trame exact du codec (la
@@ -93,7 +106,8 @@ nyquist/
 │   │   ├── spectral.rs         # ✅ FFT, spectrogramme downsamplé, cutoff + pente + dans le temps
 │   │   ├── mdct_grid.rs        # ✅ Grille de quantification MDCT d'un encodeur AAC (structurel)
 │   │   ├── stereo.rs           # ✅ Corrélation L/R, side/mid global et par bande, dual-mono
-│   │   ├── transcode_detect.rs # ✅ Scoring 3 états, voir la skill dédiée + module docs
+│   │   ├── transcode_detect.rs # ✅ Scoring 4 états, voir la skill dédiée + module docs
+│   │   ├── player.rs           # ✅ Lecture native (rodio) depuis les échantillons décodés
 │   │   └── commands.rs         # ✅ analyze_file, authorize_playback, export_report
 │   ├── tests/
 │   │   ├── calibration.rs      # ✅ Sinus à valeur RMS/peak/DR14 calculable à la main
@@ -133,7 +147,7 @@ nyquist/
 | FFT / spectrogramme | `rustfft` | STFT Hann-windowée, downsamplée en Rust avant envoi (voir `spectral.rs`). |
 | Encodage compact IPC | `base64` | Spectrogramme transmis en u8 quantifié + base64, jamais en matrice JSON dense. |
 | LUFS + True Peak | `ebur128` 0.1 | Port Rust pur de libebur128, MIT. API confirmée dans `.claude/CONTEXT.md`. |
-| Lecture audio | **pas de crate Rust** | Décision revue : `<audio>` natif du navigateur + protocole `asset://` de Tauri (`tauri = { features = ["protocol-asset"] }`), pas `rodio`. Le webview gère seek/buffering nativement sans charger le fichier entier en mémoire JS ; `rodio` a été retiré du Cargo.toml (ajouté en V0.1, jamais utilisé). Voir `commands::authorize_playback`. |
+| Lecture audio | `rodio` 0.22 (sur `cpal`) | Lecture **native**, alimentée par les échantillons que l'analyse vient de décoder — le webview ne reçoit plus aucun média. Deux tentatives via l'élément `<audio>` (protocole `asset://` puis serveur HTTP loopback) ont échoué : l'élément se forge sa propre durée, qui contredit celle du décodeur, d'où seek faux, compteur qui dérive et arrêts prématurés. Une seule horloge désormais : un index d'échantillon. MIT/Apache-2.0. Voir `player.rs` et `.claude/CONTEXT.md` avant d'y toucher. |
 | Sélecteur de fichier | `tauri-plugin-dialog` | Utilisé par `+page.svelte`. |
 | Historique local (V2.0+) | `rusqlite` | Pas encore ajouté — schéma à figer avant l'implémentation. |
 | Décodage FLAC bas niveau | `claxon` | Différé — seulement si une fonctionnalité de vérification d'intégrité bit-exact FLAC est actée. |
@@ -146,7 +160,7 @@ Défini par `AnalysisResult` dans `src-tauri/src/analysis.rs` (miroir TypeScript
 `dynamic_range` (DR14) + `spectral_analysis` (cutoff, pente de rolloff, cutoff dans le
 temps, `spectrogram` : intensité u8 quantifiée downsamplée — `TARGET_TIME_BINS`/
 `TARGET_FREQUENCY_BINS` dans `spectral.rs` — puis base64-encodée ; jamais la matrice dense,
-voir la skill `tauri-ipc-contract`) + `transcode_assessment` (verdict 3 états +
+voir la skill `tauri-ipc-contract`) + `transcode_assessment` (verdict 4 états +
 `confidence_score` + `indicators[]` : chaque indice porte la prose anglaise du backend
 (`message`, ce que voient le CLI et le JSON exporté) **et** son `code` + ses mesures brutes,
 pour que l'UI recompose la phrase en français — ajouter une variante à `IndicatorDetail`
@@ -154,9 +168,10 @@ oblige à traduire dans `i18n.svelte.ts`, sinon `npm run check` échoue) +
 `encoder_tag_matches` + `bit_depth_analysis` + `stereo_analysis` (corrélation L/R, side/mid
 par bande, dual-mono exact — `null` si le fichier n'est pas exactement stéréo).
 Payload mesuré ~240KB pour un FLAC de 6:52, calcul total ~2.4s en release (voir CONTEXT.md).
-Deux autres commandes IPC : `authorize_playback(path)` (juste avant `convertFileSrc(path)`
-côté frontend pour la lecture) et `export_report(path, json)` (le frontend sérialise et
-appelle `save()` lui-même, le backend ne fait qu'écrire le fichier).
+Deux autres commandes IPC : `authorize_playback(path)`, qui autorise le fichier **et renvoie
+l'URL** qui le joue (une seule opération : aucune URL n'existe pour un fichier non autorisé),
+et `export_report(path, json)` (le frontend sérialise et appelle `save()` lui-même, le backend
+ne fait qu'écrire le fichier).
 
 ## Roadmap
 
@@ -171,13 +186,13 @@ appelle `save()` lui-même, le backend ne fait qu'écrire le fichier).
    spectral cutoff + pente de rolloff. Reste possible pour la suite : per-channel
    spectrogram (V0.2 actuel fait un downmix mono), échelle de fréquence log plutôt que
    linéaire.
-4. **V0.3 — Détection de transcodage** ✅ (premier slice) : scoring 3 états basé sur la
+4. **V0.3 — Détection de transcodage** ✅ (premier slice) : scoring 4 états basé sur la
    pente de rolloff + empreinte de tags encodeur, indices explicites, validé contre le
    corpus (0 FP, 2 échecs documentés). Point aveugle restant : LAME V0/AAC256, aucun
    lowpass à détecter par cette méthode — reste ouvert (pas de nouvel indicateur qui le
    couvrirait spécifiquement identifié pour l'instant).
-5. **Lecture audio** ✅ (anticipée depuis V0.4) : `<audio>` natif + `asset://`, clic sur le
-   spectrogramme pour naviguer. Pas fait : marqueurs automatiques sur des points déterminés
+5. **Lecture audio** ✅ (anticipée depuis V0.4) : lecture native `rodio` depuis les
+   échantillons décodés, clic sur le spectrogramme pour naviguer. Pas fait : marqueurs automatiques sur des points déterminés
    par l'analyse (clipping, etc.) — écarté du scope actuel à la demande explicite de
    l'utilisateur, à reconsidérer après usage réel du lecteur simple.
 6. **Fonctionnalités "audiophile avancé"** ✅ (anticipées depuis V1.0+/V2.0+, ajoutées après

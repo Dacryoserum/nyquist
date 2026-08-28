@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::bit_depth::{self, BitDepthAnalysis};
-use crate::decode;
+use crate::decode::{self, DecodeStatus};
 use crate::dynamic_range::{self, DynamicRangeResult};
 use crate::mdct_grid::{self, MdctGridAnalysis};
 use crate::metadata::{self, FileInfo};
@@ -21,9 +21,22 @@ use crate::stereo::{self, StereoAnalysis};
 use crate::tags::EncoderTagMatch;
 use crate::transcode_detect::{self, TranscodeAssessment};
 
+/// Version of the analysis pipeline that produced a report.
+///
+/// Carried in the payload so an exported JSON says which build's numbers it holds: thresholds
+/// and verdict logic move between releases, and a report read six months later is otherwise
+/// impossible to interpret. Tracks the crate version rather than a hand-maintained counter.
+pub const ANALYSIS_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct AnalysisResult {
+    /// Which build of the pipeline produced these numbers — see [`ANALYSIS_VERSION`].
+    pub analysis_version: &'static str,
+    /// Whether the whole file reached the analysis. Anything but `complete` means every
+    /// measurement here describes a fragment, and `transcode_assessment` withholds its
+    /// verdict accordingly — see decode.rs.
+    pub decode_status: DecodeStatus,
     pub file_info: FileInfo,
     pub signal_analysis: SignalAnalysis,
     pub dynamic_range: DynamicRangeResult,
@@ -61,12 +74,29 @@ pub struct StageTimings {
 }
 
 pub fn analyze(path: &Path) -> Result<AnalysisResult, String> {
-    analyze_with_timings(path).map(|(result, _)| result)
+    analyze_full(path).map(|(result, _, _)| result)
 }
 
-/// [`analyze`], plus how long each stage took. Both go through this one body so the timed
-/// and untimed paths can never diverge.
+/// [`analyze`], plus how long each stage took.
 pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings), String> {
+    analyze_full(path).map(|(result, timings, _)| (result, timings))
+}
+
+/// [`analyze`], plus the decoded audio itself, so the caller can play it without decoding
+/// the file a second time.
+///
+/// The samples are handed over rather than dropped because playback needs exactly what the
+/// analysis already produced: same length, same sample rate, same clock. Decoding twice is
+/// how the app ended up with two disagreeing timelines in the first place — see player.rs.
+pub fn analyze_with_audio(path: &Path) -> Result<(AnalysisResult, decode::DecodedAudio), String> {
+    analyze_full(path).map(|(result, _, decoded)| (result, decoded))
+}
+
+/// The one body every entry point above goes through, so the timed, untimed and
+/// with-audio paths can never diverge.
+fn analyze_full(
+    path: &Path,
+) -> Result<(AnalysisResult, StageTimings, decode::DecodedAudio), String> {
     let mut timings = StageTimings::default();
     let started = Instant::now();
 
@@ -135,8 +165,10 @@ pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings
     let (signal_analysis, signal_elapsed) = signal_analysis;
     let (dynamic_range, dr_elapsed) = dynamic_range;
     let (spectral_analysis, spectral_elapsed) = spectral_analysis;
-    let ((bit_depth_analysis, bit_depth_elapsed), ((stereo_analysis, stereo_elapsed), (mdct_grid, mdct_elapsed))) =
-        bit_depth_analysis;
+    let (
+        (bit_depth_analysis, bit_depth_elapsed),
+        ((stereo_analysis, stereo_elapsed), (mdct_grid, mdct_elapsed)),
+    ) = bit_depth_analysis;
 
     timings.signal = signal_elapsed;
     timings.dynamic_range = dr_elapsed;
@@ -153,6 +185,7 @@ pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings
         &decoded.encoder_tag_matches,
         &mdct_grid,
         &decoded.codec_short_name,
+        &decoded.decode_status,
     );
     let sample_rate_analysis = sample_rate::analyze_sample_rate(
         file_info.sample_rate_hz,
@@ -163,6 +196,8 @@ pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings
 
     Ok((
         AnalysisResult {
+            analysis_version: ANALYSIS_VERSION,
+            decode_status: decoded.decode_status,
             file_info,
             signal_analysis,
             dynamic_range,
@@ -175,5 +210,6 @@ pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings
             mdct_grid,
         },
         timings,
+        decoded,
     ))
 }

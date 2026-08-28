@@ -3,11 +3,14 @@ name: Release
 # Builds the distributable artifacts for a version tag and publishes them as a GitHub
 # release.
 #
-# Published directly rather than as a draft, by choice: the artifacts go live as soon as the
-# build finishes, without anyone having opened them on a clean machine first. Since neither
-# binary is code-signed, the OS gatekeeping paths described in the release notes below are
-# therefore documented rather than verified per release — worth re-checking by hand after a
-# change to packaging, signing, or the Tauri version.
+# Published as a **draft**. Neither binary is code-signed, so the Gatekeeper and SmartScreen
+# paths described in the release notes below are the first thing a user meets, and they are
+# documented rather than verified by any automated step. A draft gives whoever cuts the
+# release the chance to open both artifacts on a clean machine before anyone can download
+# them — the alternative was artifacts going live the moment the build finished.
+#
+# The full PR validation suite runs first (see the `validate` job): a release built from a
+# commit that would not pass CI is not a release anyone should be handed.
 on:
   push:
     tags: ["v*"]
@@ -41,8 +44,14 @@ jobs:
             exit 1
           fi
 
+  # The same checks a pull request has to pass. Reused rather than restated so the two cannot
+  # drift: a release must never be built from a commit CI would have rejected.
+  validate:
+    name: Validation
+    uses: ./.github/workflows/build.yml
+
   build:
-    needs: version-check
+    needs: [version-check, validate]
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -134,5 +143,7 @@ jobs:
               info** → **Run anyway**, then the installer runs normally.
 
             Nothing you analyze leaves your machine — the app does no network I/O.
-          releaseDraft: false
+          # Draft, so the artifacts can be opened on a clean machine before anyone can
+          # download them — see the note at the top of this file.
+          releaseDraft: true
           prerelease: false

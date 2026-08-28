@@ -67,9 +67,30 @@
       <span>{column.label}</span>
     {/each}
   </div>
+  <!-- The chart above carries its numbers in `title` attributes, which a screen reader does
+       not reliably announce and a keyboard user cannot reach at all. The same readings as a
+       plain list, visually hidden: the picture is for the eye, this is the data. -->
+  <ul class="sr-only">
+    {#each columns as column (column.band.low_hz)}
+      <li>{column.range}: {fmtNumber(column.band.level_db, 0)} dB</li>
+    {/each}
+  </ul>
 </div>
 
 <style>
+  /* Available to assistive technology, absent from the layout. */
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
   .profile {
     display: flex;
     flex-direction: column;

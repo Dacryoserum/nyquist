@@ -1,11 +1,18 @@
 import { invoke } from "@tauri-apps/api/core";
 
+
+
 export interface ChannelStats {
   channel: number;
   peak_dbfs: number;
   rms_dbfs: number;
   crest_factor_db: number;
-  clipping_count: number;
+  /** Samples on the top quantization step of the declared depth — how often the signal
+   * touched the rail, not evidence of clipping by itself. */
+  full_scale_sample_count: number;
+  /** Runs of 3+ consecutive full-scale samples: a flattened waveform top. This is the one
+   * that means clipping. */
+  clipped_run_count: number;
 }
 
 export interface SignalAnalysis {
@@ -15,8 +22,27 @@ export interface SignalAnalysis {
   lufs_integrated: number | null;
   /** EBU Tech 3342 Loudness Range, in LU — companion metric to lufs_integrated. */
   loudness_range_lu: number | null;
-  clipping_count_total: number;
+  /** Oversampling factor ebur128 applied: 4 below 96 kHz, 2 up to 192, and 1 at 192 kHz and
+   * above — where no oversampling happens and the figure is a sampled peak, not a true peak.
+   * The UI must label it accordingly. */
+  true_peak_oversampling: number;
+  full_scale_sample_count_total: number;
+  clipped_run_count_total: number;
   per_channel: ChannelStats[];
+}
+
+/** Whether the whole file reached the analysis. Mirrors `DecodeStatus` in decode.rs.
+ *
+ * Anything but `complete` means every measurement in the report describes a fragment, and
+ * `transcode_assessment` withholds its verdict. */
+export interface DecodeStatus {
+  complete: boolean;
+  skipped_packets: number;
+  /** The stream asked to restart part-way through and decoding stopped there. */
+  stopped_early: boolean;
+  /** The channels came out different lengths, so different sections of the report describe
+   * different amounts of audio. Only happens on a damaged or truncated stream. */
+  channels_unequal: boolean;
 }
 
 export interface DynamicRangeResult {
@@ -42,9 +68,7 @@ export interface FileInfo {
    * this codec has none (MP3/AAC/WAV) or this particular file didn't have one embedded
    * (common on re-tagged FLACs) — check `codec === "flac"` to tell those apart. */
   integrity_verified: boolean | null;
-  /** Packets that failed to decode and were skipped. Non-zero means every measurement in
-   * this report describes damaged, incomplete audio. */
-  decode_errors: number;
+  decode_status: DecodeStatus;
 }
 
 export interface SpectrogramData {
@@ -88,9 +112,10 @@ export interface StereoAnalysis {
 }
 
 export interface SpectralAnalysis {
-  /** Where content stops: the lowpass edge if there is one, otherwise Nyquist. Raw
-   * measurement, not a transcode verdict — see spectral.rs module docs. */
-  spectral_cutoff_hz: number;
+  /** Where content stops. **null when nothing bounded it**, which is not the same as
+   * "reaches Nyquist" and must never be rendered as a frequency. Raw measurement, not a
+   * transcode verdict — see spectral.rs module docs. */
+  spectral_cutoff_hz: number | null;
   rolloff_steepness_db_per_khz: number;
   /** Position of the codec-like edge, or null when no lowpass exists anywhere above 8 kHz
    * — the latter being the evidence behind a "probably authentic" verdict. */
@@ -104,6 +129,10 @@ export interface SpectralAnalysis {
   band_levels_db: BandLevel[];
   /** How far the stopband sits below the passband, in dB. null when no edge was found. */
   stopband_depth_db: number | null;
+  /** Level of the top quarter of the declared band (never below the 22.05 kHz CD ceiling)
+   * relative to the 1–22.05 kHz reference band, in dB. null at 44.1/48 kHz, where the
+   * question does not arise. The only positive evidence of authenticity in the report. */
+  above_cd_ceiling_db: number | null;
   spectrogram: SpectrogramData;
 }
 
@@ -128,8 +157,9 @@ export type IndicatorDetail =
       tag_key: string;
       tag_value: string;
       matched_pattern: string;
-      /** Further matching tags beyond the one quoted; 0 when it was the only one. */
-      additional_matches: number;
+      /** Further *tags* beyond the one quoted; 0 when it was the only one. Counted by
+       * distinct (key, value), not by pattern hit. */
+      additional_tags: number;
     }
   | { code: "tag_is_only_evidence" }
   | { code: "tag_contradicts_spectrum" }
@@ -146,8 +176,9 @@ export type IndicatorDetail =
       baseline_percent: number;
     }
   | { code: "mdct_grid_clear" }
-  | { code: "bandwidth_above_cd_ceiling"; cutoff_khz: number }
-  | { code: "declared_lossy_codec"; codec: string };
+  | { code: "content_above_cd_ceiling"; level_db: number; ceiling_khz: number }
+  | { code: "declared_lossy_codec"; codec: string }
+  | { code: "decode_incomplete"; skipped_packets: number; stopped_early: boolean };
 
 /** A piece of evidence, carrying the backend's English prose *and* the raw observation.
  *
@@ -158,9 +189,11 @@ export type Indicator = { message: string } & IndicatorDetail;
 
 export interface TranscodeAssessment {
   verdict: Verdict;
-  /** Confidence in the *stated* verdict, 0-1 — deliberately conservative, see
-   * transcode_detect.rs module docs. Not a probability of authenticity. */
-  confidence_score: number;
+  /** Strength of the evidence behind the *stated* verdict, 0-1. **Not a probability**: these
+   * are heuristic weights tuned on a twenty-fixture corpus, so the UI shows a weak/moderate/
+   * strong band and keeps the number for the exported report. null for `declared_lossy`,
+   * where the container states the answer and there is nothing to be more or less sure of. */
+  confidence_score: number | null;
   indicators: Indicator[];
 }
 
@@ -174,18 +207,23 @@ export interface BitDepthAnalysis {
   declared_bit_depth: number | null;
   /** Smallest bit depth that explains ~all samples. Equal to declared_bit_depth in the
    * normal case; lower means the file was likely zero-padded to look deeper than it is.
-   * null means unverifiable — either no declared depth, or a declared depth above the 24
-   * bits an f32 decode can carry. */
+   * null means unverifiable — no declared depth, a declared depth above the 24 bits an f32
+   * decode can carry, or too little non-silent audio to judge. */
   effective_bit_depth: number | null;
+  /** Fraction of samples that were non-zero and therefore carried evidence. Silence sits on
+   * every quantization grid at once, so the check runs on active samples only. */
+  active_sample_ratio: number;
 }
 
 /** The sample-rate counterpart to BitDepthAnalysis: a file resampled up to a hi-res rate
  * it never earns. Lossless throughout, so invisible to the transcode verdict. */
 export interface SampleRateAnalysis {
   declared_sample_rate_hz: number;
-  content_bandwidth_hz: number;
-  /** content_bandwidth_hz as a fraction of the declared Nyquist. */
-  bandwidth_ratio: number;
+  /** null when the bandwidth was not measured at all — never a Nyquist stand-in. */
+  content_bandwidth_hz: number | null;
+  /** content_bandwidth_hz as a fraction of the declared Nyquist; null when unmeasured. */
+  bandwidth_ratio: number | null;
+  /** Set only on a bandwidth that was actually measured. */
   likely_upsampled: boolean;
   /** Smallest standard rate that would carry this content losslessly, when flagged. */
   sufficient_sample_rate_hz: number | null;
@@ -214,6 +252,10 @@ export interface MdctGridAnalysis {
 }
 
 export interface AnalysisResult {
+  /** Which build of the pipeline produced these numbers. Thresholds and verdict logic move
+   * between releases; an exported report is otherwise uninterpretable later. */
+  analysis_version: string;
+  decode_status: DecodeStatus;
   file_info: FileInfo;
   signal_analysis: SignalAnalysis;
   dynamic_range: DynamicRangeResult;
@@ -231,9 +273,62 @@ export function analyzeFile(path: string): Promise<AnalysisResult> {
   return invoke<AnalysisResult>("analyze_file", { path });
 }
 
-/** Grants the webview permission to stream exactly this file via asset://, for playback. */
-export function authorizePlayback(path: string): Promise<void> {
-  return invoke<void>("authorize_playback", { path });
+/** Everything the transport needs to draw itself, returned by every player call.
+ *
+ * `position_seconds` is derived from the sample index handed to the audio device, and
+ * `duration_seconds` from the decoder — the same number `file_info.duration_seconds` and the
+ * spectrogram's time axis use. They are one clock now. The `<audio>` element kept a second,
+ * disagreeing one, which is where the wrong seeks, the drifting counter and the early stops
+ * all came from. See src-tauri/src/player.rs. */
+export interface PlaybackState {
+  position_seconds: number;
+  duration_seconds: number;
+  playing: boolean;
+  /** The playhead reached the end of the track. */
+  ended: boolean;
+  /** No track is loaded — the audio device could not be opened, or nothing was analyzed. */
+  loaded: boolean;
+  /** Why nothing is loaded, when a load was attempted and failed. null when playback simply
+   * has not been asked for yet. */
+  unavailable_reason: string | null;
+}
+
+/** Playback is loaded by `analyzeFile` from the very samples it analyzed, so there is no
+ * separate "authorize" step and no URL: nothing is served to the webview at all. */
+export function playerPlay(): Promise<PlaybackState> {
+  return invoke<PlaybackState>("player_play");
+}
+
+export function playerPause(): Promise<PlaybackState> {
+  return invoke<PlaybackState>("player_pause");
+}
+
+/** Seconds from the start of the track, in the same units as everything else on screen. */
+export function playerSeek(seconds: number): Promise<PlaybackState> {
+  return invoke<PlaybackState>("player_seek", { seconds });
+}
+
+export function playerSetVolume(volume: number): Promise<PlaybackState> {
+  return invoke<PlaybackState>("player_set_volume", { volume });
+}
+
+/** Polled while playing to drive the playhead. Cheap on the Rust side: two atomic loads. */
+export function playerState(): Promise<PlaybackState> {
+  return invoke<PlaybackState>("player_state");
+}
+
+/** Qualitative band for a confidence weight.
+ *
+ * The backend's numbers (0.25, 0.3, 0.7, 0.9, …) are heuristic weights tuned on a small
+ * corpus, not calibrated probabilities. Rendering "90 %" claimed a precision no held-out
+ * validation set supports; the raw value stays in the exported JSON where a reader can see
+ * it for what it is. */
+export type EvidenceStrength = "weak" | "moderate" | "strong";
+
+export function evidenceStrength(confidence: number): EvidenceStrength {
+  if (confidence >= 0.85) return "strong";
+  if (confidence >= 0.6) return "moderate";
+  return "weak";
 }
 
 export function exportReport(path: string, json: string): Promise<void> {

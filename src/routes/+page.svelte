@@ -1,13 +1,18 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { open, save } from "@tauri-apps/plugin-dialog";
-  import { convertFileSrc } from "@tauri-apps/api/core";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import {
     analyzeFile,
-    authorizePlayback,
     exportReport,
+    evidenceStrength,
+    playerPause,
+    playerPlay,
+    playerSeek,
+    playerSetVolume,
+    playerState,
     type AnalysisResult,
+    type PlaybackState,
     type Verdict
   } from "$lib/api";
   import BandLevels from "$lib/components/BandLevels.svelte";
@@ -33,11 +38,23 @@ import Meter from "$lib/components/Meter.svelte";
   // different feature.
   let compareResult = $state<AnalysisResult | null>(null);
   let compareLoading = $state(false);
+  // F5: kept apart from `error` so a failed comparison cannot look like a failed analysis,
+  // and so it can be shown next to the thing that failed.
+  let compareError = $state<string | null>(null);
 
-  let audioEl = $state<HTMLAudioElement | undefined>();
-  let audioSrc = $state<string | null>(null);
+  // Playback runs in Rust, from the samples the analysis decoded — see player.rs. There is
+  // no media element and no second timeline: `currentTime` below is the position the audio
+  // device is actually at, expressed in the same seconds as `duration_seconds`.
+  let playable = $state(false);
+  // Playback failing is not the analysis failing. Kept separate so a valid report stays on
+  // screen with the player disabled and a reason beside it.
+  let playbackError = $state<string | null>(null);
   let isPlaying = $state(false);
   let currentTime = $state(0);
+  // Suppresses `timeupdate` writes while the user drags the scrubber, so the thumb does not
+  // fight the playhead. Released by `endScrub` from several directions on purpose: leaving it
+  // set freezes the displayed time for the rest of the session, while clearing it a moment
+  // early costs nothing worse than the thumb snapping to the true position.
   let scrubbing = $state(false);
   let volume = $state(1);
   let muted = $state(false);
@@ -51,7 +68,12 @@ import Meter from "$lib/components/Meter.svelte";
   });
 
   onMount(() => {
-    const saved = localStorage.getItem("nyquist-theme");
+    let saved: string | null = null;
+    try {
+      saved = localStorage.getItem("nyquist-theme");
+    } catch {
+      /* Best-effort only, like the volume and language below. */
+    }
     theme = saved === "light" || saved === "dark" ? saved : matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
     applyTheme();
     initLang();
@@ -87,7 +109,10 @@ import Meter from "$lib/components/Meter.svelte";
     } catch {
       /* Not running inside Tauri. */
     }
-    return () => unlisten?.();
+    return () => {
+      unlisten?.();
+      stopPolling();
+    };
   });
 
   function applyTheme() {
@@ -96,28 +121,128 @@ import Meter from "$lib/components/Meter.svelte";
 
   function toggleTheme() {
     theme = theme === "dark" ? "light" : "dark";
-    localStorage.setItem("nyquist-theme", theme);
+    try {
+      localStorage.setItem("nyquist-theme", theme);
+    } catch {
+      /* Best-effort only. */
+    }
     applyTheme();
   }
 
-  async function analyze(path: string) {
-    loading = true;
-    error = null;
-    result = null;
+  // Which analysis the UI currently belongs to. Every continuation below — the result, the
+  // catch, the finally, and every player callback — checks its own generation against this
+  // before writing anything, so a slow first analysis cannot land on top of a fast second
+  // one. Two quick drops used to leave the report from one file beside the player of another.
+  let generation = 0;
+
+  /** Stops and detaches the current element before its source is replaced.
+   *
+   * The backend replaces the loaded track on the next `analyzeFile`, so this only has to
+   * reset what the UI is showing and stop the position poll. */
+  function teardownPlayback() {
+    stopPolling();
+    playable = false;
     isPlaying = false;
     currentTime = 0;
-    audioSrc = null;
+    playbackError = null;
+    endScrub();
+  }
+
+  // The playhead is polled rather than pushed: at the rate it needs (about 15 Hz) an event
+  // stream costs more than it saves, and a poll cannot fall behind the way a dropped event
+  // can. Only runs while something is actually playing.
+  let pollTimer: ReturnType<typeof setInterval> | undefined;
+
+  function startPolling() {
+    if (pollTimer !== undefined) return;
+    pollTimer = setInterval(async () => {
+      const mine = generation;
+      try {
+        const state = await playerState();
+        if (mine === generation) applyPlaybackState(state);
+      } catch {
+        /* A dropped poll is not worth a message; the next one will tell the truth. */
+      }
+    }, 66);
+  }
+
+  function stopPolling() {
+    clearInterval(pollTimer);
+    pollTimer = undefined;
+  }
+
+  /** Single point where backend playback state reaches the UI, so position and playing
+   * status can never be updated from two places and disagree. */
+  function applyPlaybackState(state: PlaybackState) {
+    playable = state.loaded;
+    isPlaying = state.playing;
+    // While the user drags the scrubber the thumb is theirs; writing the device position
+    // under their finger is what made the old one fight back.
+    if (!scrubbing) currentTime = state.position_seconds;
+    if (!state.playing) stopPolling();
+  }
+
+
+  async function analyze(path: string) {
+    const mine = ++generation;
+    teardownPlayback();
+    loading = true;
+    error = null;
+    compareError = null;
+    result = null;
     lastPath = path;
     compareResult = null;
+
+    // One call now: the backend loads the decoded samples into the player as part of
+    // analysing them, so playback cannot end up describing a different file — or a different
+    // length of the same file — from the report beside it.
     try {
-      const [analysis] = await Promise.all([analyzeFile(path), authorizePlayback(path)]);
+      const analysis = await analyzeFile(path);
+      if (mine !== generation) return;
       result = analysis;
-      audioSrc = convertFileSrc(path);
     } catch (e) {
-      error = String(e);
-    } finally {
+      if (mine !== generation) return;
+      error = describeError(e);
       loading = false;
+      return;
     }
+
+    // Analysis and playback stay separate outcomes: a machine with no audio output still
+    // gets its full report, with the transport disabled and a reason beside it.
+    try {
+      const state = await playerState();
+      if (mine !== generation) return;
+      applyPlaybackState(state);
+      if (state.loaded) {
+        // The backend keeps the level across loads, but the value restored from
+        // localStorage on mount has never reached it yet.
+        pushVolume();
+      } else {
+        playbackError = T.errors.playbackUnavailable(state.unavailable_reason ?? "");
+      }
+    } catch (e) {
+      if (mine === generation) playbackError = describeError(e);
+    }
+    loading = false;
+  }
+
+  /** Turns a backend error into something a French UI can show.
+   *
+   * Backend messages are English by design — they are what the CLI prints and what an
+   * exported report preserves. Matching on their shape lets the common cases be translated
+   * while the original stays available as detail rather than being shown raw. */
+  function describeError(reason: unknown): string {
+    const raw = String(reason instanceof Error ? reason.message : reason);
+    const lower = raw.toLowerCase();
+    if (lower.includes("cannot open file")) return T.errors.cannotOpen(raw);
+    if (lower.includes("unsupported or corrupt") || lower.includes("unsupported codec")) {
+      return T.errors.unsupported(raw);
+    }
+    if (lower.includes("no audio frames") || lower.includes("no decodable audio track")) {
+      return T.errors.noAudio(raw);
+    }
+    if (lower.includes("media server")) return T.errors.playbackUnavailable(raw);
+    return raw;
   }
 
   /** Analyzes a second file into the comparison slot, leaving the first one untouched. */
@@ -125,18 +250,20 @@ import Meter from "$lib/components/Meter.svelte";
     const path = await open({
       multiple: false,
       filters: [
-        { name: t().dialogs.audioFiles, extensions: ["flac", "mp3", "m4a", "aac", "alac", "wav", "ogg"] }
+        { name: t().dialogs.audioFiles, extensions: ["flac", "mp3", "m4a", "aac", "alac", "wav", "ogg", "oga", "opus"] }
       ]
     });
     if (!path || Array.isArray(path)) return;
+    const mine = generation;
     compareLoading = true;
-    error = null;
+    compareError = null;
     try {
-      compareResult = await analyzeFile(path);
+      const analysis = await analyzeFile(path);
+      if (mine === generation) compareResult = analysis;
     } catch (e) {
-      error = String(e);
+      if (mine === generation) compareError = describeError(e);
     } finally {
-      compareLoading = false;
+      if (mine === generation) compareLoading = false;
     }
   }
 
@@ -144,50 +271,135 @@ import Meter from "$lib/components/Meter.svelte";
     const path = await open({
       multiple: false,
       filters: [
-        { name: t().dialogs.audioFiles, extensions: ["flac", "mp3", "m4a", "aac", "alac", "wav", "ogg"] }
+        { name: t().dialogs.audioFiles, extensions: ["flac", "mp3", "m4a", "aac", "alac", "wav", "ogg", "oga", "opus"] }
       ]
     });
     if (!path || Array.isArray(path)) return;
     analyze(path);
   }
 
-  function togglePlay() {
-    if (!audioEl) return;
-    isPlaying ? audioEl.pause() : audioEl.play();
+  async function togglePlay() {
+    if (!playable) return;
+    const mine = generation;
+    try {
+      const state = isPlaying ? await playerPause() : await playerPlay();
+      if (mine !== generation) return;
+      applyPlaybackState(state);
+      if (state.playing) {
+        playbackError = null;
+        startPolling();
+      }
+    } catch (e) {
+      if (mine === generation) playbackError = describeError(e);
+    }
   }
 
-  function seekTo(seconds: number) {
-    if (!audioEl) return;
-    audioEl.currentTime = seconds;
-    currentTime = seconds;
+  function endScrub() {
+    scrubbing = false;
   }
+
+  /** Moves the playhead. Sample-exact on the backend, and expressed in the same seconds as
+   * the scrubber's range and the spectrogram's axis — the three used to disagree because the
+   * media element interpreted this against a duration of its own. */
+  function seekTo(seconds: number) {
+    if (!playable) return;
+    // Optimistic, so the thumb tracks the drag without waiting on a round trip. The reply
+    // below is authoritative and corrects it if the clamp moved the target.
+    currentTime = seconds;
+    const mine = generation;
+    playerSeek(seconds)
+      .then((state) => {
+        if (mine !== generation || scrubbing) return;
+        applyPlaybackState(state);
+      })
+      .catch((e) => {
+        if (mine === generation) playbackError = describeError(e);
+      });
+  }
+
+  // Removed with the media element: the automatic-recovery machinery that reloaded the
+  // source and jumped back to where playback had died. It existed because WebKit decided a
+  // streamed file had ended before it had, and revised its own duration down to match. The
+  // backend plays from the decoded samples now, so "the track ended early" is not a state
+  // that can arise — the end of the track is a known sample index.
+
+  // Last volume that could actually be heard, so unmuting from a slider dragged to zero has
+  // something to go back to. Without it the button offered to unmute and then did nothing.
+  let lastAudibleVolume = 1;
 
   function toggleMute() {
-    muted = !muted;
+    if (muted || volume === 0) {
+      muted = false;
+      if (volume === 0) {
+        setVolume(lastAudibleVolume > 0 ? lastAudibleVolume : 1);
+        return;
+      }
+      pushVolume();
+      return;
+    }
+    if (volume > 0) lastAudibleVolume = volume;
+    muted = true;
+    pushVolume();
   }
 
   function setVolume(v: number) {
     volume = Math.min(1, Math.max(0, v));
-    if (volume > 0) muted = false;
+    if (volume > 0) {
+      muted = false;
+      lastAudibleVolume = volume;
+    }
     try {
       localStorage.setItem("nyquist-volume", String(volume));
     } catch {
       /* Best-effort only. */
     }
+    pushVolume();
+  }
+
+  /** Sends the effective level to the backend, which owns the audio device now.
+   *
+   * Mute is a UI concept here rather than a backend one: it is a level of zero that
+   * remembers what to go back to, and keeping that memory on this side means the backend
+   * has one number to hold instead of two that can contradict each other. */
+  function pushVolume() {
+    if (!playable) return;
+    playerSetVolume(muted ? 0 : volume).catch(() => {
+      /* Losing a volume change is not worth interrupting anyone over. */
+    });
+  }
+
+  // Cleared on a timer so a successful export says so and then gets out of the way.
+  let exportNotice = $state<string | null>(null);
+  let exportNoticeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function showExportNotice(message: string) {
+    exportNotice = message;
+    clearTimeout(exportNoticeTimer);
+    exportNoticeTimer = setTimeout(() => (exportNotice = null), 6000);
   }
 
   async function handleExport() {
     if (!result) return;
-    const path = await save({
-      defaultPath: `${result.file_info.filename}.report.json`,
-      filters: [{ name: t().dialogs.jsonFiles, extensions: ["json"] }]
-    });
-    if (!path) return;
-    await exportReport(path, JSON.stringify(result, null, 2));
+    try {
+      const path = await save({
+        defaultPath: `${result.file_info.filename}.report.json`,
+        filters: [{ name: t().dialogs.jsonFiles, extensions: ["json"] }]
+      });
+      if (!path) return;
+      await exportReport(path, JSON.stringify(result, null, 2));
+      showExportNotice(T.errors.exportSucceeded(path));
+    } catch (e) {
+      // Writing a file can fail for ordinary reasons — a read-only folder, a full disk —
+      // and the failure used to be swallowed, leaving the button looking like it worked.
+      showExportNotice(T.errors.exportFailed(describeError(e)));
+    }
   }
 
   const fmt = (v: number, d = 1) => fmtNumber(v, d);
-  const fmtDuration = (s: number) => `${Math.floor(s / 60)}:${Math.round(s % 60).toString().padStart(2, "0")}`;
+  // `Math.floor`, not `Math.round`: rounding 59.6 s produced "0:60", a time that does not
+  // exist. Same fix in Comparison.svelte and Spectrogram.svelte, which had the same line.
+  const fmtDuration = (s: number) =>
+    `${Math.floor(s / 60)}:${Math.floor(s % 60).toString().padStart(2, "0")}`;
   const fmtHz = (hz: number) => (hz >= 1000 ? `${fmtNumber(hz / 1000, 1)} kHz` : `${fmtNumber(hz, 0)} Hz`);
   const fmtCount = (n: number) =>
     n >= 1_000_000 ? `${fmtNumber(n / 1_000_000, 1)}M` : n >= 1_000 ? `${fmtNumber(n / 1_000, 1)}K` : `${n}`;
@@ -246,12 +458,12 @@ import Meter from "$lib/components/Meter.svelte";
         detail: T.findings.checksumMismatchDetail
       });
     }
-    if (fi.decode_errors > 0) {
+    if (!result.decode_status.complete) {
       f.push({
         icon: "alertTriangle",
         tone: "bad",
-        title: T.findings.damagedPacketsTitle(fi.decode_errors),
-        detail: T.findings.damagedPacketsDetail
+        title: T.findings.incompleteDecodeTitle(result.decode_status),
+        detail: T.findings.incompleteDecodeDetail
       });
     }
     if (bd.declared_bit_depth !== null && bd.effective_bit_depth !== null && bd.effective_bit_depth < bd.declared_bit_depth) {
@@ -259,10 +471,12 @@ import Meter from "$lib/components/Meter.svelte";
         icon: "layers",
         tone: "warn",
         title: T.findings.bitDepthPaddingTitle(bd.declared_bit_depth, bd.effective_bit_depth),
-        detail: T.findings.bitDepthPaddingDetail(bd.effective_bit_depth)
+        detail: T.findings.bitDepthPaddingDetail(bd.effective_bit_depth, fmt(bd.active_sample_ratio * 100, 1))
       });
     }
-    if (sr.likely_upsampled) {
+    // `likely_upsampled` is only ever set on a bandwidth that was actually measured, so the
+    // two non-null reads below are guaranteed — asserted rather than assumed all the same.
+    if (sr.likely_upsampled && sr.content_bandwidth_hz !== null && sr.bandwidth_ratio !== null) {
       f.push({
         icon: "ruler",
         tone: "warn",
@@ -273,12 +487,18 @@ import Meter from "$lib/components/Meter.svelte";
         )
       });
     }
-    if (sa.clipping_count_total > 0) {
+    // Runs of full-scale samples, not the raw count: one sample touching the rail is a loud
+    // transient, a run of them is a waveform with its top cut off. Reporting the count alone
+    // called a legitimately hot master clipped.
+    if (sa.clipped_run_count_total > 0) {
       f.push({
         icon: "clip",
-        tone: sa.clipping_count_total > 1000 ? "bad" : "warn",
-        title: T.findings.clippedSamplesTitle(fmtCount(sa.clipping_count_total)),
-        detail: T.findings.clippedSamplesDetail
+        tone: sa.clipped_run_count_total > 100 ? "bad" : "warn",
+        title: T.findings.clippedRunsTitle(
+          fmtCount(sa.clipped_run_count_total),
+          fmtCount(sa.full_scale_sample_count_total)
+        ),
+        detail: T.findings.clippedRunsDetail
       });
     }
     return f;
@@ -286,6 +506,12 @@ import Meter from "$lib/components/Meter.svelte";
 </script>
 
 <svelte:head><title>Nyquist</title></svelte:head>
+
+<!-- A drag that ends outside the scrubber — pointer released over another element, dragged
+     out of the window, cancelled by the OS — never fires `change` on the input. Watching the
+     window guarantees the release is seen wherever it happens, which is what turns the
+     scrub guard from a latch that can stick shut into one that always reopens. -->
+<svelte:window onpointerup={endScrub} onpointercancel={endScrub} />
 
 <div class="shell" class:dragging data-drop-label={T.dragOverlay}>
   <header class="topbar">
@@ -332,9 +558,6 @@ import Meter from "$lib/components/Meter.svelte";
         <h2>{T.dropzone.title}</h2>
         <p>{T.dropzone.subtitle}</p>
         <button class="primary" onclick={pickAndAnalyze}>{T.dropzone.chooseFile}</button>
-        {#if error}
-          <p class="error" role="alert">{error}</p>
-        {/if}
       </section>
     {/if}
 
@@ -346,7 +569,11 @@ import Meter from "$lib/components/Meter.svelte";
       </section>
     {/if}
 
-    {#if error && result === null && !loading && lastPath}
+    <!-- One home for the analysis error, whatever state the page is in: it used to be
+         rendered in two places with different conditions, so a message could appear twice or
+         not at all. Playback and comparison failures have their own slots, next to the thing
+         that failed. -->
+    {#if error && !loading}
       <p class="error standalone" role="alert">{error}</p>
     {/if}
 
@@ -356,6 +583,14 @@ import Meter from "$lib/components/Meter.svelte";
 
     {#if compareLoading}
       <p class="compare-loading" aria-live="polite">{T.compare.loading}</p>
+    {/if}
+
+    {#if compareError}
+      <p class="error standalone" role="alert">{T.compare.errorPrefix} {compareError}</p>
+    {/if}
+
+    {#if exportNotice}
+      <p class="export-notice" aria-live="polite">{exportNotice}</p>
     {/if}
 
     {#if result && !compareResult}
@@ -376,12 +611,16 @@ import Meter from "$lib/components/Meter.svelte";
             <h2>{vm.label}</h2>
             <p>{vm.blurb}</p>
           </div>
-          <!-- No percentage for `declared_lossy`: the container states it outright, so a
-               confident-looking 100% would read as the same kind of claim as the other
-               three verdicts, which it is not. -->
-          {#if ta.verdict !== "declared_lossy"}
+          <!-- A weak/moderate/strong band, not a percentage. The backend's numbers are
+               heuristic weights tuned on a twenty-fixture corpus; "90 %" claimed a precision
+               no held-out validation set supports. The raw value is still in the exported
+               JSON. Absent entirely for `declared_lossy`, where the container states the
+               answer and there is nothing to be more or less sure of. -->
+          {#if ta.confidence_score !== null}
             <div class="confidence">
-              <span class="confidence-value">{fmt(ta.confidence_score * 100, 0)}<i>%</i></span>
+              <span class="confidence-value confidence-{evidenceStrength(ta.confidence_score)}">
+                {T.verdict.strength[evidenceStrength(ta.confidence_score)]}
+              </span>
               <span class="confidence-label">{T.verdict.confidence}</span>
             </div>
           {/if}
@@ -425,11 +664,27 @@ import Meter from "$lib/components/Meter.svelte";
           <div class="bandwidth-head">
             <span class="label">{T.file.bandwidthUsed}</span>
             <span class="value" class:value-warn={sr.likely_upsampled}>
-              {T.file.bandwidthPhrase(fmtHz(sr.content_bandwidth_hz), fmtHz(fi.nyquist_hz))}
-              <em>({fmt(sr.bandwidth_ratio * 100, 0)}%)</em>
+              {#if sr.content_bandwidth_hz !== null && sr.bandwidth_ratio !== null}
+                {T.file.bandwidthPhrase(fmtHz(sr.content_bandwidth_hz), fmtHz(fi.nyquist_hz))}
+                <em>({fmt(sr.bandwidth_ratio * 100, 0)}%)</em>
+              {:else}
+                <!-- Nothing bounded the content. Not the same as "reaches Nyquist", and the
+                     Nyquist stand-in that used to fill this slot reported a bass-only file
+                     as carrying its full declared bandwidth at 100 %. -->
+                {T.file.bandwidthUnmeasured}
+              {/if}
             </span>
           </div>
-          <Meter value={sr.bandwidth_ratio} min={0} max={1} tone={sr.likely_upsampled ? "warn" : "good"} />
+          {#if sr.bandwidth_ratio !== null}
+            <Meter
+              value={sr.bandwidth_ratio}
+              min={0}
+              max={1}
+              label={T.file.bandwidthUsed}
+              valueText="{fmt(sr.bandwidth_ratio * 100, 0)}%"
+              tone={sr.likely_upsampled ? "warn" : "good"}
+            />
+          {/if}
         </div>
       </section>
 
@@ -437,15 +692,17 @@ import Meter from "$lib/components/Meter.svelte";
         <h2 class="section-title">{T.spectrum.title}</h2>
         <Spectrogram
           data={spa.spectrogram}
-          spectralCutoffHz={spa.spectral_cutoff_hz}
+          spectralCutoffHz={spa.spectral_cutoff_hz ?? undefined}
           cutoffOverTimeHz={spa.cutoff_over_time_hz}
           currentTimeSeconds={currentTime}
-          onSeek={audioSrc ? seekTo : undefined}
+          onSeek={playable ? seekTo : undefined}
         />
         <div class="spectral-stats">
           <div class="stat-block">
             <span class="label">{T.spectrum.bandwidth}</span>
-            <span class="value">{fmtHz(spa.spectral_cutoff_hz)}</span>
+            <span class="value">
+              {spa.spectral_cutoff_hz !== null ? fmtHz(spa.spectral_cutoff_hz) : T.spectrum.noLimitMeasured}
+            </span>
           </div>
           <div class="stat-block">
             <span class="label">{T.spectrum.rolloffSteepness}</span>
@@ -474,7 +731,15 @@ import Meter from "$lib/components/Meter.svelte";
               <span class="value">{sa.lufs_integrated !== null ? `${fmt(sa.lufs_integrated)} LUFS` : T.loudness.na}</span>
             </div>
             {#if sa.lufs_integrated !== null}
-              <Meter value={sa.lufs_integrated} min={-30} max={0} reference={-14} referenceLabel={T.loudness.lufsTargetNote} />
+              <Meter
+                value={sa.lufs_integrated}
+                min={-30}
+                max={0}
+                label={T.loudness.integratedLoudness}
+                valueText="{fmt(sa.lufs_integrated)} LUFS"
+                reference={-14}
+                referenceLabel={T.loudness.lufsTargetNote}
+              />
               <span class="scale-note">{T.loudness.lufsTargetNote}</span>
             {/if}
           </div>
@@ -482,11 +747,27 @@ import Meter from "$lib/components/Meter.svelte";
           <div class="metric">
             <div class="metric-head">
               <span class="label">{T.loudness.truePeak}</span>
-              <span class="value {truePeakTone(sa.true_peak_dbtp)}">{fmt(sa.true_peak_dbtp)} dBTP</span>
+              <span class="value {truePeakTone(sa.true_peak_dbtp)}">
+                {fmt(sa.true_peak_dbtp)} {sa.true_peak_oversampling > 1 ? "dBTP" : "dBFS"}
+              </span>
             </div>
-            <Meter value={sa.true_peak_dbtp} min={-12} max={3} tone={truePeakTone(sa.true_peak_dbtp)} reference={-1} referenceLabel="-1 dBTP" />
+            <Meter
+              value={sa.true_peak_dbtp}
+              min={-12}
+              max={3}
+              label={T.loudness.truePeak}
+              valueText="{fmt(sa.true_peak_dbtp)} {sa.true_peak_oversampling > 1 ? 'dBTP' : 'dBFS'}"
+              tone={truePeakTone(sa.true_peak_dbtp)}
+              reference={-1}
+              referenceLabel="-1 dBTP"
+            />
             <span class="scale-note">
               {sa.true_peak_dbtp > 0 ? T.loudness.clipWarnNote : T.loudness.headroomNote}
+              <!-- At 192 kHz and above the library does no oversampling, so this is a sampled
+                   peak wearing a true-peak label unless we say otherwise. -->
+              {#if sa.true_peak_oversampling <= 1}
+                — {T.loudness.noOversamplingNote}
+              {/if}
             </span>
           </div>
 
@@ -516,18 +797,29 @@ import Meter from "$lib/components/Meter.svelte";
               </span>
             </div>
             {#if dr.dr14 !== null}
-              <Meter value={dr.dr14} min={0} max={20} tone={drTone(dr.dr14)} />
+              <Meter
+                value={dr.dr14}
+                min={0}
+                max={20}
+                label={T.dynamics.dynamicRange}
+                valueText="DR{dr.dr14}"
+                tone={drTone(dr.dr14)}
+              />
               <span class="scale-note">{T.dynamics.drNote(T.dynamics.drLabel(dr.dr14))}</span>
             {/if}
           </div>
 
           <div class="metric">
             <div class="metric-head">
-              <span class="label">{T.dynamics.clippedSamples}</span>
-              <span class="value {sa.clipping_count_total > 0 ? 'warn' : ''}">{fmtCount(sa.clipping_count_total)}</span>
+              <span class="label">{T.dynamics.clippedRuns}</span>
+              <span class="value {sa.clipped_run_count_total > 0 ? 'warn' : ''}">
+                {fmtCount(sa.clipped_run_count_total)}
+              </span>
             </div>
+            <span class="scale-note">{T.dynamics.fullScaleNote(fmtCount(sa.full_scale_sample_count_total))}</span>
           </div>
 
+          <div class="table-scroll">
           <table class="channels">
             <thead>
               <tr>
@@ -536,6 +828,7 @@ import Meter from "$lib/components/Meter.svelte";
                 <th>{T.dynamics.table.rms}</th>
                 <th>{T.dynamics.table.crest}</th>
                 <th>{T.dynamics.table.dr}</th>
+                <th>{T.dynamics.table.fullScale}</th>
                 <th>{T.dynamics.table.clipped}</th>
               </tr>
             </thead>
@@ -547,11 +840,13 @@ import Meter from "$lib/components/Meter.svelte";
                   <td>{fmt(ch.rms_dbfs)}</td>
                   <td>{fmt(ch.crest_factor_db)}</td>
                   <td>{dr.per_channel_db[ch.channel - 1] != null ? fmt(dr.per_channel_db[ch.channel - 1] ?? 0) : "—"}</td>
-                  <td>{fmtCount(ch.clipping_count)}</td>
+                  <td>{fmtCount(ch.full_scale_sample_count)}</td>
+                  <td>{fmtCount(ch.clipped_run_count)}</td>
                 </tr>
               {/each}
             </tbody>
           </table>
+          </div>
           <p class="note">{T.dynamics.channelsNote}</p>
         </section>
       </div>
@@ -637,6 +932,8 @@ import Meter from "$lib/components/Meter.svelte";
                 value={st.correlation}
                 min={-1}
                 max={1}
+                label={T.stereo.correlation}
+                valueText={fmt(st.correlation, 2)}
                 reference={0}
                 referenceLabel="0"
                 tone={st.mono_compatibility_risk ? "bad" : "good"}
@@ -666,7 +963,13 @@ import Meter from "$lib/components/Meter.svelte";
               {#each st.per_band as band (band.name)}
                 <div class="band-row">
                   <span class="band-range">{T.stereo.bandName(band.name)}</span>
-                  <Meter value={band.side_to_mid_db} min={-60} max={0} />
+                  <Meter
+                    value={band.side_to_mid_db}
+                    min={-60}
+                    max={0}
+                    label={T.stereo.bandName(band.name)}
+                    valueText="{fmt(band.side_to_mid_db, 0)} dB"
+                  />
                   <span class="band-value">{fmt(band.side_to_mid_db, 0)}</span>
                 </div>
               {/each}
@@ -680,7 +983,16 @@ import Meter from "$lib/components/Meter.svelte";
     {/if}
   </main>
 
-  {#if result && audioSrc}
+  {#if result && playbackError}
+    <!-- The report above is valid; only playback failed. Said here, beside the player, so it
+         cannot be mistaken for a problem with the analysis. -->
+    <p class="playback-error" role="alert">
+      <Icon name="alertTriangle" size={14} />
+      {playbackError}
+    </p>
+  {/if}
+
+  {#if result && playable}
     <div class="player">
       <button class="play" onclick={togglePlay} aria-label={isPlaying ? T.player.pause : T.player.play}>
         <Icon name={isPlaying ? "pause" : "play"} size={15} />
@@ -694,11 +1006,20 @@ import Meter from "$lib/components/Meter.svelte";
         step="0.1"
         value={currentTime}
         aria-label={T.player.playbackPosition}
-        oninput={(e) => {
+        onpointerdown={(e) => {
           scrubbing = true;
-          seekTo(Number(e.currentTarget.value));
+          // Keeps the drag attached to this control even if the pointer leaves the window,
+          // so the release that clears the lock is guaranteed to arrive.
+          e.currentTarget.setPointerCapture?.(e.pointerId);
         }}
-        onchange={() => (scrubbing = false)}
+        onkeydown={() => (scrubbing = true)}
+        oninput={(e) => seekTo(Number(e.currentTarget.value))}
+        onchange={endScrub}
+        onpointerup={endScrub}
+        onpointercancel={endScrub}
+        onlostpointercapture={endScrub}
+        onkeyup={endScrub}
+        onblur={endScrub}
       />
       <span class="time muted-time">{fmtDuration(result.file_info.duration_seconds)}</span>
       <button class="mute" onclick={toggleMute} aria-label={muted || volume === 0 ? T.player.unmute : T.player.mute}>
@@ -717,23 +1038,38 @@ import Meter from "$lib/components/Meter.svelte";
     </div>
   {/if}
 
-  {#if audioSrc}
-    <audio
-      bind:this={audioEl}
-      src={audioSrc}
-      bind:volume
-      bind:muted
-      ontimeupdate={(e) => {
-        if (!scrubbing) currentTime = e.currentTarget.currentTime;
-      }}
-      onplay={() => (isPlaying = true)}
-      onpause={() => (isPlaying = false)}
-      onended={() => (isPlaying = false)}
-    ></audio>
-  {/if}
+  <!-- No media element. Audio is played in Rust from the samples the analysis decoded, so
+       the webview holds no opinion about this file at all — see src-tauri/src/player.rs. -->
 </div>
 
 <style>
+  /* Playback and export notices: same ink language as the rest, but pinned to the bottom
+     rail where the player lives so they read as belonging to it rather than to the report. */
+  .playback-error {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0.55rem 1rem;
+    font-size: 0.78rem;
+    color: var(--warn);
+    background: var(--surface);
+    border-top: 1px solid var(--rule);
+  }
+
+  .export-notice {
+    margin: 0.75rem auto 0;
+    max-width: 62rem;
+    padding: 0.5rem 0.75rem;
+    font-size: 0.78rem;
+    color: var(--ink-mid);
+    border-left: 2px solid var(--rule-strong);
+  }
+
+  .confidence-weak {
+    opacity: 0.7;
+  }
+
   /* ── Instrument theme ───────────────────────────────────────────────────────────────
      Built from the thinking orb's own visual model: monochrome ink painted on
      transparency, form made of dots, hierarchy carried by alpha rather than by colour or
@@ -814,6 +1150,9 @@ import Meter from "$lib/components/Meter.svelte";
     z-index: 20;
     display: grid;
     place-items: center;
+    /* Opaque fallback first: without it a WKWebView that cannot parse `color-mix` drops the
+       property and the drop overlay shows with no backdrop at all. */
+    background: var(--bg);
     background: color-mix(in srgb, var(--bg) 82%, transparent);
     border: 1px dashed var(--ink-faint);
     color: var(--ink-hi);
@@ -863,7 +1202,21 @@ import Meter from "$lib/components/Meter.svelte";
 
   .topbar-actions {
     display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
     gap: 0.4rem;
+  }
+
+  /* The window can be resized down to the 560px `minWidth` in tauri.conf.json, and with a
+     report open the topbar carries five buttons whose French labels are the longest in the
+     app. Without the wrap above they pushed the wordmark out of the window. */
+
+  /* Wide content — the per-channel table — scrolls inside its own box rather than making the
+     page scroll sideways. A horizontally scrolling body is the one responsive failure a user
+     cannot work around. */
+  .table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
   }
 
   /* Global because `.ghost` below is, and the two have to be judged by the same cascade.
@@ -1114,12 +1467,6 @@ import Meter from "$lib/components/Meter.svelte";
     line-height: 1;
     font-variant-numeric: tabular-nums;
     color: var(--verdict-ink);
-  }
-
-  .confidence-value i {
-    font-style: normal;
-    font-size: 0.8rem;
-    color: var(--ink-low);
   }
 
   .confidence-label {
@@ -1462,6 +1809,24 @@ import Meter from "$lib/components/Meter.svelte";
     color: var(--bad);
   }
 
+  /* TEMPORARY DIAGNOSTIC — remove before committing. */
+  .diag {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 5.5rem;
+    margin: 0;
+    padding: 0.5rem 0.8rem;
+    font-family: var(--mono);
+    font-size: 0.6rem;
+    line-height: 1.5;
+    color: var(--warn);
+    background: var(--bg);
+    border-top: 1px solid var(--ink-hair);
+    white-space: pre-wrap;
+    z-index: 20;
+  }
+
   .compare-loading {
     margin: 2rem 0;
     text-align: center;
@@ -1596,6 +1961,21 @@ import Meter from "$lib/components/Meter.svelte";
     /* The player is already tight against a narrow scrubber; the volume slider is the
        first thing to go, not the mute button that still communicates state. */
     .volume {
+      display: none;
+    }
+  }
+
+  /* At the window's own minimum the topbar cannot hold a wordmark and five labelled buttons
+     on one line, whatever wrapping allows. */
+  @media (max-width: 600px) {
+    .topbar {
+      flex-wrap: wrap;
+      gap: 0.6rem;
+    }
+    .topbar-actions {
+      justify-content: flex-start;
+    }
+    .tagline {
       display: none;
     }
   }

@@ -30,7 +30,9 @@ struct Fixture {
     /// Note this is no longer the peak-relative "-40 dB below the spectral peak" point: that
     /// reference only behaves on flat material, and reading it on music-shaped input is what
     /// made every real file inconclusive. See `spectral::find_spectral_edge`.
-    expected_cutoff_range_hz: (f64, f64),
+    /// `None` when the wide probe is expected to find no bound on the content at all —
+    /// a distinct outcome from "reaches Nyquist", see `SpectralAnalysis::spectral_cutoff_hz`.
+    expected_cutoff_range_hz: Option<(f64, f64)>,
     /// Nominal length in seconds. Per-fixture rather than a shared constant: the
     /// silence-padded transcode is deliberately longer than the 5s the rest share.
     expected_duration_seconds: f64,
@@ -52,7 +54,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "authentic_44k_noise.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
         known_undetectable: false,
@@ -61,7 +63,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "authentic_96k_noise.flac",
         expected_sample_rate: 96_000,
         expected_channels: 2,
-        expected_cutoff_range_hz: (46_000.0, 48_000.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
         known_undetectable: false,
@@ -73,7 +75,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "authentic_44k_lowpass_naturally.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (19_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
         known_undetectable: false,
@@ -84,7 +86,7 @@ const FIXTURES: &[Fixture] = &[
         expected_channels: 2,
         // LAME 320's wall is narrow enough that the wide bandwidth probe steps over it;
         // it is caught by steepness, which is what the verdict assertion below covers.
-        expected_cutoff_range_hz: (19_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
         known_undetectable: false,
@@ -93,7 +95,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_mp3_128_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (15_500.0, 18_000.0),
+        expected_cutoff_range_hz: Some((16_500.0, 17_500.0)),
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
         known_undetectable: false,
@@ -105,7 +107,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_mp3_v0_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
         known_undetectable: true,
@@ -114,7 +116,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_aac_256_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
         known_undetectable: false,
@@ -129,7 +131,7 @@ const FIXTURES: &[Fixture] = &[
         expected_sample_rate: 44_100,
         expected_channels: 2,
         // Tonal content has no lowpass, so its bandwidth reads as Nyquist.
-        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
         known_undetectable: false,
@@ -141,7 +143,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "authentic_musiclike_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: false,
         known_undetectable: false,
@@ -152,7 +154,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "authentic_musiclike_96k.flac",
         expected_sample_rate: 96_000,
         expected_channels: 2,
-        expected_cutoff_range_hz: (46_000.0, 48_000.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: false,
         known_undetectable: false,
@@ -166,7 +168,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_mp3_128_padded_silence.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (15_500.0, 18_000.0),
+        expected_cutoff_range_hz: Some((16_500.0, 17_500.0)),
         expected_duration_seconds: 11.0,
         is_actually_transcoded: true,
         known_undetectable: false,
@@ -179,7 +181,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "upsampled_44k_to_96k.flac",
         expected_sample_rate: 96_000,
         expected_channels: 2,
-        expected_cutoff_range_hz: (22_000.0, 26_000.0),
+        expected_cutoff_range_hz: Some((24_000.0, 26_000.0)),
         expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
         known_undetectable: false,
@@ -190,7 +192,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_mp3_128_upsampled_96k.flac",
         expected_sample_rate: 96_000,
         expected_channels: 2,
-        expected_cutoff_range_hz: (15_500.0, 18_000.0),
+        expected_cutoff_range_hz: Some((16_500.0, 17_500.0)),
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
         known_undetectable: false,
@@ -206,7 +208,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "authentic_dynamic_stereo_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: false,
         known_undetectable: false,
@@ -217,7 +219,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_dynamic_mp3_128_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (15_500.0, 18_000.0),
+        expected_cutoff_range_hz: Some((16_400.0, 17_400.0)),
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
         known_undetectable: false,
@@ -229,7 +231,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_dynamic_mp3_v0_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
         known_undetectable: true,
@@ -239,7 +241,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_dynamic_aac_256_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
         known_undetectable: false,
@@ -253,7 +255,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_dynamic_aac_128_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (18_000.0, 19_500.0),
+        expected_cutoff_range_hz: Some((18_000.0, 19_000.0)),
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
         known_undetectable: false,
@@ -267,7 +269,7 @@ const FIXTURES: &[Fixture] = &[
         expected_sample_rate: 44_100,
         expected_channels: 2,
         // Content genuinely stops where the top partial sits — no lowpass, so no edge.
-        expected_cutoff_range_hz: (10_000.0, 22_050.0),
+        expected_cutoff_range_hz: Some((10_700.0, 11_700.0)),
         expected_duration_seconds: 10.0,
         is_actually_transcoded: false,
         known_undetectable: false,
@@ -278,7 +280,7 @@ const FIXTURES: &[Fixture] = &[
         filename: "authentic_bass_only_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        expected_cutoff_range_hz: (21_000.0, 22_050.0),
+        expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: false,
         known_undetectable: false,
@@ -294,13 +296,23 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
     let mut false_positives: Vec<&str> = Vec::new();
     let mut false_negatives: Vec<&str> = Vec::new();
     let mut known_misses: Vec<&str> = Vec::new();
+    let mut vouched_for_fakes: Vec<&str> = Vec::new();
 
     for fx in FIXTURES {
         let path = corpus_dir().join(fx.filename);
-        let decoded = decode_file(&path).unwrap_or_else(|e| panic!("{}: decode failed: {e}", fx.filename));
+        let decoded =
+            decode_file(&path).unwrap_or_else(|e| panic!("{}: decode failed: {e}", fx.filename));
 
-        assert_eq!(decoded.sample_rate, fx.expected_sample_rate, "{}: unexpected sample rate", fx.filename);
-        assert_eq!(decoded.channels, fx.expected_channels, "{}: unexpected channel count", fx.filename);
+        assert_eq!(
+            decoded.sample_rate, fx.expected_sample_rate,
+            "{}: unexpected sample rate",
+            fx.filename
+        );
+        assert_eq!(
+            decoded.channels, fx.expected_channels,
+            "{}: unexpected channel count",
+            fx.filename
+        );
         assert!(
             decoded.channel_samples.iter().all(|c| !c.is_empty()),
             "{}: decoded to empty channel buffer",
@@ -317,30 +329,51 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
             file_info.duration_seconds
         );
 
-        let signal = analyze_signal(&decoded).unwrap_or_else(|e| panic!("{}: signal analysis failed: {e}", fx.filename));
-        assert!(signal.peak_dbfs.is_finite(), "{}: non-finite peak", fx.filename);
-        assert!(signal.rms_dbfs.is_finite(), "{}: non-finite RMS", fx.filename);
+        let signal = analyze_signal(&decoded)
+            .unwrap_or_else(|e| panic!("{}: signal analysis failed: {e}", fx.filename));
+        assert!(
+            signal.peak_dbfs.is_finite(),
+            "{}: non-finite peak",
+            fx.filename
+        );
+        assert!(
+            signal.rms_dbfs.is_finite(),
+            "{}: non-finite RMS",
+            fx.filename
+        );
         assert!(
             signal.lufs_integrated.is_some_and(f64::is_finite),
             "{}: expected a measurable LUFS value for non-silent noise/sine content",
             fx.filename
         );
-        assert_eq!(signal.per_channel.len(), fx.expected_channels, "{}: per-channel stats count mismatch", fx.filename);
+        assert_eq!(
+            signal.per_channel.len(),
+            fx.expected_channels,
+            "{}: per-channel stats count mismatch",
+            fx.filename
+        );
 
-        let spectral =
-            analyze_spectrum(&decoded).unwrap_or_else(|e| panic!("{}: spectral analysis failed: {e}", fx.filename));
+        let spectral = analyze_spectrum(&decoded)
+            .unwrap_or_else(|e| panic!("{}: spectral analysis failed: {e}", fx.filename));
         eprintln!(
-            "{}: spectral_cutoff_hz = {}, rolloff_steepness_db_per_khz = {}",
-            fx.filename, spectral.spectral_cutoff_hz, spectral.rolloff_steepness_db_per_khz
+            "{}: spectral_cutoff_hz = {:?}, rolloff_steepness_db_per_khz = {}, above_cd_ceiling_db = {:?}",
+            fx.filename, spectral.spectral_cutoff_hz, spectral.rolloff_steepness_db_per_khz, spectral.above_cd_ceiling_db
         );
-        assert!(
-            spectral.spectral_cutoff_hz >= fx.expected_cutoff_range_hz.0
-                && spectral.spectral_cutoff_hz <= fx.expected_cutoff_range_hz.1,
-            "{}: spectral cutoff {} Hz outside expected range {:?}",
-            fx.filename,
-            spectral.spectral_cutoff_hz,
-            fx.expected_cutoff_range_hz
-        );
+        // `None` is a legitimate measurement outcome — nothing bounded the content — and is
+        // checked against the fixture's own ground truth rather than folded into a number.
+        match (spectral.spectral_cutoff_hz, fx.expected_cutoff_range_hz) {
+            (Some(hz), Some((lo, hi))) => assert!(
+                hz >= lo && hz <= hi,
+                "{}: spectral cutoff {hz} Hz outside expected range {:?}",
+                fx.filename,
+                (lo, hi)
+            ),
+            (None, None) => {}
+            (measured, expected) => panic!(
+                "{}: spectral cutoff was {measured:?}, expected {expected:?}",
+                fx.filename
+            ),
+        }
         assert_eq!(
             spectral.cutoff_over_time_hz.len(),
             spectral.spectrogram.time_bin_count,
@@ -348,12 +381,16 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
             fx.filename
         );
         assert!(
-            spectral.cutoff_over_time_hz.iter().all(|&hz| hz.is_finite() && hz >= 0.0),
+            spectral
+                .cutoff_over_time_hz
+                .iter()
+                .all(|&hz| hz.is_finite() && hz >= 0.0),
             "{}: cutoff_over_time_hz contains a non-finite or negative value",
             fx.filename
         );
 
-        let expected_bytes = spectral.spectrogram.time_bin_count * spectral.spectrogram.frequency_bin_count;
+        let expected_bytes =
+            spectral.spectrogram.time_bin_count * spectral.spectrogram.frequency_bin_count;
         let expected_base64_len = expected_bytes.div_ceil(3) * 4;
         assert_eq!(
             spectral.spectrogram.intensity_base64.len(),
@@ -363,13 +400,23 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
         );
 
         let grid = analyze_mdct_grid(&decoded);
-        let assessment =
-            assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches, &grid, &decoded.codec_short_name);
+        let assessment = assess_transcode_risk(
+            &spectral,
+            file_info.nyquist_hz as f64,
+            &decoded.encoder_tag_matches,
+            &grid,
+            &decoded.codec_short_name,
+            &decoded.decode_status,
+        );
         eprintln!(
-            "{}: verdict = {:?}, confidence = {:.2}, actually_transcoded = {}",
+            "{}: verdict = {:?}, confidence = {:?}, actually_transcoded = {}",
             fx.filename, assessment.verdict, assessment.confidence_score, fx.is_actually_transcoded
         );
-        assert!(!assessment.indicators.is_empty(), "{}: verdict has no stated indicators", fx.filename);
+        assert!(
+            !assessment.indicators.is_empty(),
+            "{}: verdict has no stated indicators",
+            fx.filename
+        );
 
         let flagged_transcoded = matches!(assessment.verdict, Verdict::ProbablyTranscoded);
         match (fx.is_actually_transcoded, flagged_transcoded) {
@@ -377,6 +424,11 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
             (true, false) if fx.known_undetectable => known_misses.push(fx.filename),
             (true, false) => false_negatives.push(fx.filename),
             _ => {}
+        }
+        // Missing a transcode is a limit of the method. *Vouching* for one is a different
+        // failure and the more damaging of the two: the user is told the file is fine.
+        if fx.is_actually_transcoded && assessment.verdict == Verdict::ProbablyAuthentic {
+            vouched_for_fakes.push(fx.filename);
         }
     }
 
@@ -389,16 +441,31 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
         known_misses.len()
     );
 
+    // The line the tool must never cross, and the one it used to: an actual transcode coming
+    // back "probably authentic". Both LAME V0 fixtures did, at 0.65, because a clean spectral
+    // sweep was treated as evidence of authenticity rather than as an absence of evidence.
+    // They now read `Indeterminate` — still a miss, but an honest one.
+    assert!(
+        vouched_for_fakes.is_empty(),
+        "the tool vouched for known transcodes: {vouched_for_fakes:?}"
+    );
+
     // A false positive here means flagging a genuinely authentic (or, for the natural-
     // lowpass trap fixture, authentic-but-treble-poor) file as transcoded — the single
     // worst outcome for this tool, per AGENTS.md and the transcode-heuristic-validation
     // skill. Zero tolerance on the current corpus.
-    assert!(false_positives.is_empty(), "false positives on authentic fixtures: {false_positives:?}");
+    assert!(
+        false_positives.is_empty(),
+        "false positives on authentic fixtures: {false_positives:?}"
+    );
     // A false negative on a case NOT already documented as undetectable would mean the
     // heuristic regressed on a case it used to catch (e.g. mp3_128/mp3_320). The two
     // known/documented misses (V0, AAC256) are asserted separately below so a fix to that
     // blind spot is visible instead of silently swallowed by a loose assertion.
-    assert!(false_negatives.is_empty(), "unexpected false negatives: {false_negatives:?}");
+    assert!(
+        false_negatives.is_empty(),
+        "unexpected false negatives: {false_negatives:?}"
+    );
     assert_eq!(
         known_misses.len(),
         2,
@@ -428,7 +495,8 @@ fn dual_mono_is_detected_exactly() {
 
     for (filename, expect_dual_mono) in cases {
         let decoded = decode_file(&corpus_dir().join(filename)).expect("fixture should decode");
-        let stereo = analyze_stereo(&decoded).expect("two-channel fixture should yield stereo analysis");
+        let stereo =
+            analyze_stereo(&decoded).expect("two-channel fixture should yield stereo analysis");
 
         assert_eq!(
             stereo.dual_mono, expect_dual_mono,
@@ -440,7 +508,11 @@ fn dual_mono_is_detected_exactly() {
             "{filename}: correlation {} outside -1..=1",
             stereo.correlation
         );
-        assert_eq!(stereo.per_band.len(), 3, "{filename}: expected low/mid/high bands");
+        assert_eq!(
+            stereo.per_band.len(),
+            3,
+            "{filename}: expected low/mid/high bands"
+        );
 
         if expect_dual_mono {
             // A duplicated channel has no side content at all, so width must read at the
@@ -474,8 +546,14 @@ fn a_pure_sine_is_never_reported_as_transcoded() {
     let file_info = build_file_info(&path, &decoded).expect("metadata should build");
     let spectral = analyze_spectrum(&decoded).expect("spectral analysis should succeed");
     let grid = analyze_mdct_grid(&decoded);
-    let assessment =
-        assess_transcode_risk(&spectral, file_info.nyquist_hz as f64, &decoded.encoder_tag_matches, &grid, &decoded.codec_short_name);
+    let assessment = assess_transcode_risk(
+        &spectral,
+        file_info.nyquist_hz as f64,
+        &decoded.encoder_tag_matches,
+        &grid,
+        &decoded.codec_short_name,
+        &decoded.decode_status,
+    );
 
     assert_eq!(
         spectral.rolloff_steepness_db_per_khz, 0.0,
@@ -509,16 +587,17 @@ fn upsampled_hi_res_is_detected_without_false_positives() {
 
     for (filename, expected_upsampled) in cases {
         let path = corpus_dir().join(filename);
-        let decoded = decode_file(&path).unwrap_or_else(|e| panic!("{filename}: decode failed: {e}"));
-        let spectral =
-            analyze_spectrum(&decoded).unwrap_or_else(|e| panic!("{filename}: spectral failed: {e}"));
-        let analysis =
-            analyze_sample_rate(decoded.sample_rate, spectral.spectral_cutoff_hz);
+        let decoded =
+            decode_file(&path).unwrap_or_else(|e| panic!("{filename}: decode failed: {e}"));
+        let spectral = analyze_spectrum(&decoded)
+            .unwrap_or_else(|e| panic!("{filename}: spectral failed: {e}"));
+        let analysis = analyze_sample_rate(decoded.sample_rate, spectral.spectral_cutoff_hz);
 
         assert_eq!(
-            analysis.likely_upsampled, *expected_upsampled,
+            analysis.likely_upsampled,
+            *expected_upsampled,
             "{filename}: expected likely_upsampled={expected_upsampled}, got {} \
-             (declared {} Hz, bandwidth {:.0} Hz, ratio {:.2})",
+             (declared {} Hz, bandwidth {:?} Hz, ratio {:?})",
             analysis.likely_upsampled,
             analysis.declared_sample_rate_hz,
             analysis.content_bandwidth_hz,
@@ -526,9 +605,9 @@ fn upsampled_hi_res_is_detected_without_false_positives() {
         );
 
         if *expected_upsampled {
-            let sufficient = analysis
-                .sufficient_sample_rate_hz
-                .unwrap_or_else(|| panic!("{filename}: flagged as upsampled but named no sufficient rate"));
+            let sufficient = analysis.sufficient_sample_rate_hz.unwrap_or_else(|| {
+                panic!("{filename}: flagged as upsampled but named no sufficient rate")
+            });
             assert!(
                 sufficient < analysis.declared_sample_rate_hz,
                 "{filename}: sufficient rate {sufficient} must be below the declared rate"
@@ -537,21 +616,51 @@ fn upsampled_hi_res_is_detected_without_false_positives() {
     }
 }
 
-/// Clipping is counted on both halves of the waveform. Signed PCM is asymmetric — 16-bit
-/// positive full scale normalizes to 0.99997, not 1.0 — so a naive `abs() >= 1.0` test
-/// silently counted only negative-side clipping and halved every reported figure.
+/// Full-scale samples are counted on both halves of the waveform. Signed PCM is asymmetric —
+/// 16-bit positive full scale normalizes to 0.99997, not 1.0 — so a naive `abs() >= 1.0` test
+/// silently counted only negative-side hits and halved every reported figure.
+///
+/// Also pins the distinction the count used to blur: 2000 samples sitting on the rail in two
+/// long runs is two *flattened* stretches, not two thousand separate clipping events.
 #[test]
-fn clipping_is_counted_symmetrically() {
+fn full_scale_samples_are_counted_symmetrically_and_runs_separately() {
     let path = corpus_dir().join("calibration/fullscale_both_polarities.flac");
     let decoded = decode_file(&path).expect("full-scale fixture should decode");
     let signal = analyze_signal(&decoded).expect("signal analysis should succeed");
 
     // 1000 samples at +32767 and 1000 at -32768.
     assert_eq!(
-        signal.clipping_count_total, 2000,
+        signal.full_scale_sample_count_total, 2000,
         "expected both polarities counted (2000); got {} — a value near 1000 means only \
          the negative half is being detected",
-        signal.clipping_count_total
+        signal.full_scale_sample_count_total
+    );
+    assert!(
+        signal.clipped_run_count_total > 0 && signal.clipped_run_count_total < 100,
+        "a handful of sustained plateaus, not one event per sample; got {}",
+        signal.clipped_run_count_total
+    );
+}
+
+/// A 24-bit file's clipping threshold has to be one 24-bit LSB from full scale, not one
+/// 16-bit LSB. At the old fixed threshold the top 256 codes of a 24-bit file all read as
+/// sitting on the rail, so ordinary loud 24-bit material reported clipping it does not have.
+#[test]
+fn the_clipping_threshold_follows_the_declared_depth() {
+    let path = corpus_dir().join("bitdepth_genuine24.flac");
+    let decoded = decode_file(&path).expect("24-bit fixture should decode");
+    assert_eq!(
+        decoded.bits_per_sample,
+        Some(24),
+        "fixture must declare 24-bit"
+    );
+    let signal = analyze_signal(&decoded).expect("signal analysis should succeed");
+
+    // The fixture is loud but not clipped; nothing here may read as flattened.
+    assert_eq!(
+        signal.clipped_run_count_total, 0,
+        "an unclipped 24-bit file must report no flattened runs; got {}",
+        signal.clipped_run_count_total
     );
 }
 

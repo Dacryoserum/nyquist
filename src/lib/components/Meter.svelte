@@ -13,11 +13,20 @@
     reference,
     referenceLabel,
     dots = 32,
-    gradient = false
+    gradient = false,
+    label,
+    valueText
   }: {
     value: number;
     min: number;
     max: number;
+    /** What this meter measures. Required in practice: `role="meter"` with a value and no
+     * name is announced as a bare number, which on a page carrying six of them says nothing
+     * about which reading is being read out. */
+    label: string;
+    /** The reading as a person would say it — "-14 LUFS", "-1 dBTP". Without it a screen
+     * reader reads `aria-valuenow` as a naked figure with no unit. */
+    valueText?: string;
     tone?: "good" | "warn" | "bad" | "neutral";
     reference?: number;
     referenceLabel?: string;
@@ -64,9 +73,11 @@
   class:warn={tone === "warn"}
   class:bad={tone === "bad"}
   role="meter"
+  aria-label={label}
   aria-valuenow={value}
   aria-valuemin={min}
   aria-valuemax={max}
+  aria-valuetext={valueText}
 >
   {#each Array(dots) as _, i (i)}
     <!-- Lit dots fade in toward the reading's head, echoing the orb's depth shading
@@ -111,7 +122,12 @@
 
   .dot.lit {
     /* `color-mix` rather than two stacked layers: the dot has to stay a single painted
-       element for the alpha ramp above to keep working on top of it. */
+       element for the alpha ramp above to keep working on top of it.
+
+       The unmixed colour goes first as a fallback — `color-mix` is not in WKWebView before
+       macOS 12 and this app declares 10.15 — so an engine that cannot parse the second
+       declaration lights the dot in the plain tone rather than leaving it unpainted. */
+    background: var(--meter-ink);
     background: color-mix(in srgb, var(--meter-ink) var(--tint), var(--ink-hi));
     opacity: var(--lit-alpha);
   }
