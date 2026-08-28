@@ -6,11 +6,15 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Callable from release.yml, so a release is gated on exactly the checks a PR must pass
+  # rather than on a second, drifting copy of them.
+  workflow_call:
 
-# A new push to the same PR makes the previous run irrelevant.
+# A new push to the same PR makes the previous run irrelevant. Not applied to a
+# `workflow_call`: cancelling the caller's validation would cancel the release.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -34,6 +38,20 @@ jobs:
       - run: npm run check
       - run: npm run build
 
+  # Its own job, on the cheapest runner: formatting needs no toolchain beyond rustfmt and no
+  # dependency build, so gating the platform matrix on it would only slow the feedback down.
+  format:
+    name: Formatting (rustfmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt
+        working-directory: src-tauri
+        run: cargo fmt --all -- --check
+
   backend:
     name: Backend (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -42,8 +60,8 @@ jobs:
       matrix:
         # macOS is the primary target. Windows is here because the release workflow ships a
         # Windows binary, and a platform nobody builds on is a platform that quietly breaks:
-        # this catches path handling, the `asset://` protocol's different host on Windows,
-        # and any dependency that turns out not to be as portable as assumed. The corpus
+        # this catches path handling, the media server's platform-specific positional reads
+        # and CSPRNG, and any dependency that turns out not to be as portable as assumed. The corpus
         # fixtures are committed, so the tests need no ffmpeg on either runner.
         os: [macos-latest, windows-latest]
     steps:

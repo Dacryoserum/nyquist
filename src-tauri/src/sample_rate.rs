@@ -47,12 +47,18 @@ const BANDWIDTH_TOLERANCE: f64 = 0.9;
 #[serde(rename_all = "snake_case")]
 pub struct SampleRateAnalysis {
     pub declared_sample_rate_hz: u32,
-    /// Highest frequency still carrying meaningful content — the spectral cutoff.
-    pub content_bandwidth_hz: f64,
+    /// Highest frequency still carrying meaningful content — the spectral cutoff. `None`
+    /// when the sweep found no point where the content stops, which is not the same as the
+    /// content reaching Nyquist and must not be displayed as a bandwidth figure.
+    pub content_bandwidth_hz: Option<f64>,
     /// `content_bandwidth_hz` as a fraction of the declared Nyquist. Near 1.0 means the
-    /// declared rate is being used; near 0.5 means roughly half of it is empty.
-    pub bandwidth_ratio: f64,
-    /// True only for files that both claim hi-res and fail to use it.
+    /// declared rate is being used; near 0.5 means roughly half of it is empty. `None`
+    /// whenever the bandwidth itself was not measured — a ratio of 1.0 fabricated from a
+    /// Nyquist fallback is exactly the number that made a bass-only file read as
+    /// full-bandwidth hi-res.
+    pub bandwidth_ratio: Option<f64>,
+    /// True only for files that claim hi-res, were actually measured, and fail to use it.
+    /// Never set on an unmeasured bandwidth.
     pub likely_upsampled: bool,
     /// Smallest standard sample rate whose Nyquist covers the measured bandwidth — i.e.
     /// what this content would fit in losslessly. `None` when the file isn't claiming
@@ -60,18 +66,29 @@ pub struct SampleRateAnalysis {
     pub sufficient_sample_rate_hz: Option<u32>,
 }
 
-/// `spectral_cutoff_hz` comes from `spectral.rs` and is a raw measurement; this module
-/// only interprets it against the declared rate.
-pub fn analyze_sample_rate(declared_sample_rate_hz: u32, spectral_cutoff_hz: f64) -> SampleRateAnalysis {
+/// `spectral_cutoff_hz` comes from `spectral.rs` and is a raw measurement; this module only
+/// interprets it against the declared rate.
+///
+/// `None` means the sweep found no point where the content stops, and nothing here can be
+/// concluded from that: it is consistent with a file that fills its bandwidth and with one
+/// whose energy fades too gradually to bound. Reported as unmeasured rather than assumed to
+/// reach Nyquist — the fallback used to hand this function a ratio of 1.0 for a file it had
+/// measured nothing about.
+pub fn analyze_sample_rate(
+    declared_sample_rate_hz: u32,
+    spectral_cutoff_hz: Option<f64>,
+) -> SampleRateAnalysis {
     let nyquist_hz = declared_sample_rate_hz as f64 / 2.0;
-    let bandwidth_ratio =
-        if nyquist_hz > 0.0 { (spectral_cutoff_hz / nyquist_hz).clamp(0.0, 1.0) } else { 0.0 };
+    let bandwidth_ratio = spectral_cutoff_hz
+        .filter(|_| nyquist_hz > 0.0)
+        .map(|hz| (hz / nyquist_hz).clamp(0.0, 1.0));
 
     let claims_hi_res = declared_sample_rate_hz > HI_RES_THRESHOLD_HZ;
-    let likely_upsampled = claims_hi_res && bandwidth_ratio < MIN_BANDWIDTH_RATIO;
+    let likely_upsampled =
+        claims_hi_res && bandwidth_ratio.is_some_and(|ratio| ratio < MIN_BANDWIDTH_RATIO);
 
     let sufficient_sample_rate_hz = if likely_upsampled {
-        let needed_nyquist = spectral_cutoff_hz * BANDWIDTH_TOLERANCE;
+        let needed_nyquist = spectral_cutoff_hz.unwrap_or(nyquist_hz) * BANDWIDTH_TOLERANCE;
         STANDARD_SAMPLE_RATES_HZ
             .iter()
             .copied()
@@ -95,7 +112,7 @@ mod tests {
 
     #[test]
     fn genuine_hi_res_using_its_bandwidth_is_not_flagged() {
-        let analysis = analyze_sample_rate(96_000, 47_900.0);
+        let analysis = analyze_sample_rate(96_000, Some(47_900.0));
         assert!(!analysis.likely_upsampled);
         assert_eq!(analysis.sufficient_sample_rate_hz, None);
     }
@@ -103,9 +120,9 @@ mod tests {
     #[test]
     fn hi_res_declaration_with_cd_bandwidth_is_flagged() {
         // The 44.1 -> 96 kHz corpus fixture measures ~24.8 kHz of content.
-        let analysis = analyze_sample_rate(96_000, 24_800.0);
+        let analysis = analyze_sample_rate(96_000, Some(24_800.0));
         assert!(analysis.likely_upsampled);
-        assert!(analysis.bandwidth_ratio < 0.55);
+        assert!(analysis.bandwidth_ratio.unwrap() < 0.55);
         assert_eq!(analysis.sufficient_sample_rate_hz, Some(48_000));
     }
 
@@ -113,7 +130,21 @@ mod tests {
     fn cd_rate_files_are_never_flagged_however_dark() {
         // A genuinely treble-poor 44.1 kHz master is ordinary content, not a resolution
         // claim — this module must stay silent about it.
-        let analysis = analyze_sample_rate(44_100, 6_000.0);
+        let analysis = analyze_sample_rate(44_100, Some(6_000.0));
+        assert!(!analysis.likely_upsampled);
+        assert_eq!(analysis.sufficient_sample_rate_hz, None);
+    }
+
+    /// An unmeasured bandwidth is not a wide one. Nothing may be concluded, and nothing may
+    /// be displayed as though it had been measured.
+    #[test]
+    fn an_unmeasured_bandwidth_produces_no_ratio_and_no_verdict() {
+        let analysis = analyze_sample_rate(96_000, None);
+        assert_eq!(analysis.content_bandwidth_hz, None);
+        assert_eq!(
+            analysis.bandwidth_ratio, None,
+            "no ratio may be fabricated from a fallback"
+        );
         assert!(!analysis.likely_upsampled);
         assert_eq!(analysis.sufficient_sample_rate_hz, None);
     }

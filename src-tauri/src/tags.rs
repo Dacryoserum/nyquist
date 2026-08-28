@@ -19,19 +19,32 @@ use symphonia::core::meta::RawValue;
 /// those files just as it does for AAC purchases. Treating it as a lossy signature made
 /// every iTunes-ripped ALAC read as "probably transcoded". A tool that can produce either
 /// format is not evidence of which one happened, so it does not belong on this list.
-const KNOWN_LOSSY_ENCODER_PATTERNS: &[&str] =
-    &["lame", "libmp3lame", "qaac", "nero aac", "faac", "fdk-aac", "fraunhofer", "gogo", "xing", "blade"];
+const KNOWN_LOSSY_ENCODER_PATTERNS: &[&str] = &[
+    "lame",
+    "libmp3lame",
+    "qaac",
+    "nero aac",
+    "faac",
+    "fdk-aac",
+    "fraunhofer",
+    "gogo",
+    "xing",
+    "blade",
+];
 
 /// Only tag keys naming the *encoding tool* are scanned. Free-text fields are not:
 /// matching against every value in the file meant a track whose comment happened to read
 /// "ripped from CD with iTunes" — or an album titled after a codec — was scored as a
 /// transcode on the strength of prose. Substring-matched case-insensitively, so this
 /// covers ENCODER, ENCODED_BY, ENCODER_SETTINGS, MP4's `©too`, and friends.
-const ENCODER_TAG_KEY_MARKERS: &[&str] = &["encoder", "encoded", "encoding", "tool", "software", "too"];
+const ENCODER_TAG_KEY_MARKERS: &[&str] =
+    &["encoder", "encoded", "encoding", "tool", "software", "too"];
 
 fn is_encoder_tag_key(key: &str) -> bool {
     let key_lower = key.to_lowercase();
-    ENCODER_TAG_KEY_MARKERS.iter().any(|marker| key_lower.contains(marker))
+    ENCODER_TAG_KEY_MARKERS
+        .iter()
+        .any(|marker| key_lower.contains(marker))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -55,7 +68,9 @@ pub fn scan_for_lossy_encoder_traces(format: &mut Box<dyn FormatReader>) -> Vec<
         if !is_encoder_tag_key(&tag.raw.key) {
             continue;
         }
-        let Some(value_str) = tag_value_as_string(&tag.raw.value) else { continue };
+        let Some(value_str) = tag_value_as_string(&tag.raw.value) else {
+            continue;
+        };
         let value_lower = value_str.to_lowercase();
         for pattern in KNOWN_LOSSY_ENCODER_PATTERNS {
             if value_lower.contains(pattern) {

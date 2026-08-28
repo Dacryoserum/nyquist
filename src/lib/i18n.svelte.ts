@@ -13,7 +13,7 @@
  * technical/debug text, not part of this catalogue.
  */
 
-import type { Indicator } from "$lib/api";
+import type { DecodeStatus, Indicator } from "$lib/api";
 
 /** Display name for a codec short name. Acronyms stay upper-case, words stay capitalized —
  * "OPUS" and "VORBIS" read as shouting where "Opus" and "Vorbis" are just names. */
@@ -84,6 +84,10 @@ interface Dict {
     /** Names the format, because "lossy" alone leaves the reader asking which one. */
     declaredLossy: { label: (codec: string) => string; blurb: string };
     confidence: string;
+    /** Weak/moderate/strong rather than a percentage: the backend's numbers are heuristic
+     * weights tuned on a small corpus, and rendering them as "90 %" claimed a precision no
+     * held-out validation set supports. The raw value stays in the exported JSON. */
+    strength: { weak: string; moderate: string; strong: string };
   };
   /** Renders one piece of the verdict's evidence. Exhaustive over `Indicator["code"]` in
    * both languages — a new indicator variant in transcode_detect.rs fails `npm run check`
@@ -93,24 +97,37 @@ interface Dict {
   findings: {
     checksumMismatchTitle: string;
     checksumMismatchDetail: string;
-    damagedPacketsTitle: (n: number) => string;
-    damagedPacketsDetail: string;
+    incompleteDecodeTitle: (status: DecodeStatus) => string;
+    incompleteDecodeDetail: string;
     bitDepthPaddingTitle: (declared: number, effective: number) => string;
-    bitDepthPaddingDetail: (effective: number) => string;
+    bitDepthPaddingDetail: (effective: number, activePct: string) => string;
     upsampledTitle: (declaredKHz: string, usedKHz: string) => string;
     upsampledDetail: (pct: string, sufficientKHz: string | null) => string;
-    clippedSamplesTitle: (n: string) => string;
-    clippedSamplesDetail: string;
+    clippedRunsTitle: (runs: string, samples: string) => string;
+    clippedRunsDetail: string;
+  };
+  /** Messages for failures the user can act on. Backend prose is English by design — it is
+   * what the CLI prints and what an exported report preserves — so the common cases are
+   * re-stated here with the original kept as detail. */
+  errors: {
+    cannotOpen: (raw: string) => string;
+    unsupported: (raw: string) => string;
+    noAudio: (raw: string) => string;
+    playbackUnavailable: (raw: string) => string;
+    exportSucceeded: (path: string) => string;
+    exportFailed: (reason: string) => string;
   };
   file: {
     bandwidthUsed: string;
     bandwidthPhrase: (used: string, nyquist: string) => string;
+    bandwidthUnmeasured: string;
   };
   spectrum: {
     title: string;
     bandwidth: string;
     rolloffSteepness: string;
     noEdgeFound: string;
+    noLimitMeasured: string;
     steepnessValue: (db: string, hz: string) => string;
     note: string;
   };
@@ -122,6 +139,8 @@ interface Dict {
     truePeak: string;
     clipWarnNote: string;
     headroomNote: string;
+    /** Shown at 192 kHz and above, where ebur128 does no oversampling. */
+    noOversamplingNote: string;
     loudnessRange: string;
     peakRms: string;
   };
@@ -130,8 +149,9 @@ interface Dict {
     dynamicRange: string;
     drLabel: (dr: number) => string;
     drNote: (label: string) => string;
-    clippedSamples: string;
-    table: { ch: string; peak: string; rms: string; crest: string; dr: string; clipped: string };
+    clippedRuns: string;
+    fullScaleNote: (samples: string) => string;
+    table: { ch: string; peak: string; rms: string; crest: string; dr: string; fullScale: string; clipped: string };
     channelsNote: string;
   };
   file2: {
@@ -196,6 +216,12 @@ interface Dict {
     groupSpectrum: string;
     yes: string;
     no: string;
+    errorPrefix: string;
+    /** Which of the two files the single shared player is bound to. */
+    nowPlaying: (filename: string) => string;
+    /** Screen-reader label for the marker on the leading value in a row. */
+    leads: string;
+    evidence: string;
   };
   disclaimer: string;
   player: { play: string; pause: string; playbackPosition: string; mute: string; unmute: string; volume: string };
@@ -245,7 +271,7 @@ const fr: Dict = {
   verdict: {
     probablyAuthentic: {
       label: "Probablement authentique",
-      blurb: "Aucune empreinte d'encodeur trouvée dans le spectre."
+      blurb: "Un élément positif a été mesuré, qui écarte une source avec perte à la fréquence du CD."
     },
     probablyTranscoded: {
       label: "Probablement transcodé",
@@ -253,24 +279,25 @@ const fr: Dict = {
     },
     indeterminate: {
       label: "Indéterminé",
-      blurb: "Pas assez d'éléments dans un sens ou dans l'autre. C'est une réponse à part entière, pas un échec."
+      blurb: "Aucun indice de transcodage n'a été trouvé — ce qui n'est pas une preuve d'authenticité. C'est une réponse à part entière, pas un échec."
     },
     declaredLossy: {
       label: (codec) => `Format avec perte (${codecName(codec)})`,
       blurb: "Ce fichier est dans un format avec perte et ne prétend pas le contraire. Il n'y a donc rien à démasquer — les mesures ci-dessous le décrivent quand même intégralement."
     },
-    confidence: "confiance"
+    confidence: "force des indices",
+    strength: { weak: "faible", moderate: "modérée", strong: "forte" }
   },
   indicator: (i) => {
     switch (i.code) {
       case "encoder_tag_matched":
         return `Le tag d'encodeur « ${i.tag_key} » vaut « ${i.tag_value} », ce qui correspond à l'encodeur exclusivement avec perte « ${i.matched_pattern} »${
-          i.additional_matches > 0
-            ? i.additional_matches > 1
-              ? `, plus ${i.additional_matches} autres tags correspondants`
+          i.additional_tags > 0
+            ? i.additional_tags > 1
+              ? `, plus ${i.additional_tags} autres tags correspondants`
               : ", plus un autre tag correspondant"
             : ""
-        }.`;
+        }. Les tags stockés en fin de fichier (ID3v1, APEv2) ne sont pas lus : leur absence ne prouve donc rien dans un sens ni dans l'autre.`;
       case "tag_is_only_evidence":
         return "Le spectre seul n'a rien permis de conclure : ce verdict repose donc sur le tag — qui peut être obsolète, recopié depuis un fichier source, ou tout simplement faux.";
       case "tag_contradicts_spectrum":
@@ -282,67 +309,106 @@ const fr: Dict = {
       case "no_encoder_lowpass":
         return `Aucun passe-bas d'encodeur trouvé : le spectre a été balayé depuis ${fmtNumber(i.scanned_from_khz, 0)} kHz jusqu'à la fréquence de Nyquist de ${fmtNumber(i.nyquist_khz, 1)} kHz, et aucun point n'a montré la chute nette vers une bande vide durable que laisse un codec avec perte.`;
       case "transparent_encode_unseen":
-        return "Cela n'exclut pas un encodage avec perte transparent (par ex. LAME V0, AAC 256 kbps) — le corpus du projet montre que ceux-ci se mesurent de façon indiscernable du sans perte par cette méthode. La confiance est plafonnée en conséquence.";
+        return "Ce n'est pas une preuve d'authenticité. Un encodage avec perte transparent (par ex. LAME V0) ne filtre pas du tout, et le corpus du projet montre que ceux-ci se mesurent de façon indiscernable du sans perte par cette méthode : une coupure absente est donc tout aussi compatible avec un transcodage MP3 soigné. Aucun indice de transcodage n'a été détecté — ce qui n'est pas la même affirmation que « le fichier est sans perte ».";
       case "gradual_rolloff":
         return `Le contenu s'arrête autour de ${fmtNumber(i.cutoff_khz, 1)} kHz, mais la transition y est progressive (~${fmtNumber(i.steepness_db_per_khz, 0)} dB/kHz) plutôt que le mur quasi vertical que produit un codec. C'est compatible avec un master volontairement sombre, un report de vinyle ou de bande, ou un encodage avec perte dont cette méthode ne peut pas distinguer le filtre — pas de quoi trancher dans un sens ou dans l'autre.`;
       case "mdct_grid_aligned":
-        return `Les coefficients MDCT du fichier s'effondrent à un alignement de trame précis (décalage ${i.frame_offset}, ${fmtNumber(i.z_score, 0)} écarts-types au-dessus de ce que fait ce même fichier à tous les autres décalages) : ${fmtNumber(i.zero_percent, 1)} % des coefficients y sont annulés, contre ${fmtNumber(i.baseline_percent, 1)} % ailleurs. C'est la grille de quantification d'un encodeur AAC. De l'audio sans perte n'a aucun alignement de ce genre.`;
+        return `Les coefficients MDCT du fichier s'effondrent à un alignement de trame précis (décalage ${i.frame_offset}, ${fmtNumber(i.z_score, 0)} écarts-types au-dessus de ce que fait ce même fichier à tous les autres décalages) : ${fmtNumber(i.zero_percent, 1)} % des coefficients y sont annulés, contre ${fmtNumber(i.baseline_percent, 1)} % ailleurs. C'est la signature d'une grille de quantification d'encodeur AAC. De l'audio sans perte n'a aucune raison de présenter un tel alignement. La méthode suppose un AAC à blocs longs et n'examine qu'un seul canal — voir mdct_grid.rs pour son périmètre exact.`;
       case "mdct_grid_clear":
         return "Le balayage de la grille MDCT n'a trouvé aucun alignement d'encodeur, ce qui écarte une source AAC — y compris aux réglages transparents qu'une mesure spectrale ne peut pas voir. Cela ne dit rien du MP3, dont le banc de filtres hybride n'est pas inversible par cette méthode : le point aveugle se rétrécit, il ne se referme pas.";
       case "declared_lossy_codec":
         return `Ce fichier est en ${i.codec.toUpperCase()}, un format avec perte. Il ne se fait pas passer pour autre chose : il n'y a donc pas de transcodage à détecter, et la question à laquelle ce verdict répond — un conteneur sans perte cache-t-il de l'audio avec perte — ne s'applique pas. Toutes les mesures ci-dessous décrivent malgré tout le fichier fidèlement, y compris le passe-bas et la grille de trames de son propre encodeur.`;
-      case "bandwidth_above_cd_ceiling":
-        return `Le contenu monte jusqu'à ${fmtNumber(i.cutoff_khz, 1)} kHz, au-dessus du plafond de 22,05 kHz que peut porter n'importe quelle source à la fréquence du CD. Cela écarte le chemin de transcodage le plus courant par la mesure, et non par absence de preuve.`;
+      case "content_above_cd_ceiling":
+        return `La bande au-dessus de ${fmtNumber(i.ceiling_khz, 2)} kHz porte du contenu réel — ${fmtNumber(i.level_db, 0)} dB par rapport à la bande située en dessous. Aucun encodage avec perte à la fréquence du CD n'existe à une fréquence d'échantillonnage assez élevée pour l'y mettre : tout ce chemin de transcodage est écarté par la mesure, et non par absence de preuve. C'est le seul élément positif d'authenticité de ce rapport.`;
+      case "decode_incomplete": {
+        const quoi =
+          i.skipped_packets === 0
+            ? "le flux a demandé à être redémarré en cours de route (segments chaînés ou changement de format) et le décodage s'est arrêté là"
+            : i.stopped_early
+              ? `${i.skipped_packets} paquet(s) n'ont pas pu être décodés et ont été ignorés, puis le flux a demandé à être redémarré en cours de route et le décodage s'est arrêté là`
+              : `${i.skipped_packets} paquet(s) n'ont pas pu être décodés et ont été ignorés`;
+        return `Une partie de l'audio n'est jamais parvenue à l'analyse : ${quoi}. Toutes les mesures ci-dessous ne décrivent que la portion qui s'est décodée, donc aucun verdict sur le fichier entier ne peut être rendu. Réparez ou ré-extrayez le fichier, puis relancez l'analyse.`;
+      }
+      // Un code inconnu vient d'un backend plus récent que cette interface : on retombe sur
+      // la prose anglaise du backend plutôt que de rendre `undefined`.
+      default:
+        return (i as { message: string }).message;
     }
   },
   findings: {
     checksumMismatchTitle: "Somme de contrôle invalide",
     checksumMismatchDetail:
       "L'audio ne correspond pas à la somme de contrôle stockée dans le fichier. Il a été tronqué, modifié ou corrompu depuis sa création.",
-    damagedPacketsTitle: (n) => (n > 1 ? `${n} paquets endommagés ignorés` : `${n} paquet endommagé ignoré`),
-    damagedPacketsDetail:
-      "Une partie du fichier n'a pas pu être décodée. Chaque mesure ci-dessous décrit l'audio qui a survécu, pas la piste entière.",
+    incompleteDecodeTitle: (s) =>
+      s.channels_unequal
+        ? "Canaux de longueurs différentes"
+        : s.skipped_packets === 0
+          ? "Décodage interrompu en cours de fichier"
+          : s.stopped_early
+            ? `${s.skipped_packets} paquet(s) ignoré(s), puis décodage interrompu`
+            : s.skipped_packets > 1
+              ? `${s.skipped_packets} paquets endommagés ignorés`
+              : "1 paquet endommagé ignoré",
+    incompleteDecodeDetail:
+      "Une partie du fichier n'est jamais parvenue à l'analyse, ou les canaux n'ont pas la même longueur. Chaque mesure ci-dessous décrit l'audio qui a survécu, pas la piste entière, et le verdict de transcodage est suspendu pour cette raison.",
     bitDepthPaddingTitle: (declared, effective) => `Conteneur ${declared} bits contenant de l'audio ${effective} bits`,
-    bitDepthPaddingDetail: (effective) =>
-      `Chaque échantillon tombe exactement sur la grille de quantification à ${effective} bits : la résolution supplémentaire ne porte aucune information. Le fichier a été rembourré, pas réellement remasterisé.`,
+    bitDepthPaddingDetail: (effective, activePct) =>
+      `Sur les ${activePct} % d'échantillons non silencieux, tous tombent exactement sur la grille de quantification à ${effective} bits : la résolution supplémentaire ne porte aucune information mesurable. C'est compatible avec un simple rembourrage plutôt qu'avec un véritable remastering. À noter : un fichier correctement dithéré avant rembourrage échapperait à ce test.`,
     upsampledTitle: (declaredKHz, usedKHz) => `${declaredKHz} kHz déclarés, ${usedKHz} kHz utilisés`,
     upsampledDetail: (pct, sufficientKHz) =>
       `Le contenu s'arrête à ${pct}% de la bande passante que cette fréquence d'échantillonnage est censée porter${
         sufficientKHz ? `. Un fichier à ${sufficientKHz} kHz contiendrait tout, sans perte` : ""
-      }. L'audio est intact — c'est la fréquence d'échantillonnage annoncée qui est gonflée.`,
-    clippedSamplesTitle: (n) => `${n} échantillons écrêtés`,
-    clippedSamplesDetail: "Échantillons plaqués au plein échelle, là où la forme d'onde a été aplatie plutôt que reproduite."
+      }. L'audio est intact ; c'est compatible avec un sur-échantillonnage depuis une fréquence plus basse. La mesure tolère 10 % de marge pour absorber la traînée du ré-échantillonneur.`,
+    clippedRunsTitle: (runs, samples) =>
+      `${runs} passage(s) aplati(s) au plein échelle (${samples} échantillons concernés)`,
+    clippedRunsDetail:
+      "Des échantillons consécutifs plaqués au plein échelle : c'est compatible avec un écrêtage, là où la forme d'onde a été aplatie plutôt que reproduite. Un échantillon isolé au plein échelle est un transitoire fort, pas un écrêtage — seuls les passages soutenus sont comptés ici. Le seuil suit la profondeur déclarée du fichier."
+  },
+  errors: {
+    cannotOpen: (raw) => `Ce fichier n'a pas pu être ouvert. (${raw})`,
+    unsupported: (raw) => `Format non pris en charge, ou fichier corrompu. (${raw})`,
+    noAudio: (raw) => `Aucun audio décodable n'a été trouvé dans ce fichier. (${raw})`,
+    playbackUnavailable: (raw) =>
+      `Lecture indisponible : aucune sortie audio n'a pu être ouverte. L'analyse ci-dessous n'est pas affectée.${raw ? ` (${raw})` : ""}`,
+    exportSucceeded: (path) => `Rapport enregistré dans ${path}`,
+    exportFailed: (reason) => `Le rapport n'a pas pu être enregistré. ${reason}`
   },
   file: {
     bandwidthUsed: "Bande passante utilisée",
-    bandwidthPhrase: (used, nyquist) => `${used} sur ${nyquist}`
+    bandwidthPhrase: (used, nyquist) => `${used} sur ${nyquist}`,
+    bandwidthUnmeasured: "aucune limite mesurable"
   },
   spectrum: {
     title: "Spectre",
     bandwidth: "Bande passante",
     rolloffSteepness: "Pente de coupure",
     noEdgeFound: "aucune coupure détectée",
+    noLimitMeasured: "aucune limite mesurable",
     steepnessValue: (db, hz) => `${db} dB/kHz à ${hz}`,
-    note: "La bande passante indique où le contenu s'arrête — le bord du filtre passe-bas s'il y en a un, sinon Nyquist. La pente est ce qui distingue un encodeur d'un mixage sombre : le filtre d'un codec tombe à pic, un choix de mastering s'estompe progressivement. Cliquez sur le spectrogramme pour déplacer la lecture à cet endroit."
+    note: "La bande passante indique où le contenu s'arrête, quand ce point est mesurable ; « aucune limite mesurable » signifie que le balayage n'a trouvé aucun point d'arrêt, ce qui n'est pas la même chose qu'un contenu qui monte jusqu'à Nyquist. La pente est ce qui distingue un encodeur d'un mixage sombre : le filtre d'un codec tombe à pic, un choix de mastering s'estompe progressivement. Cliquez sur le spectrogramme pour déplacer la lecture à cet endroit."
   },
   loudness: {
     title: "Sonie",
     integratedLoudness: "Sonie intégrée",
     na: "n/d",
-    lufsTargetNote: "le repère marque la cible streaming de -14 LUFS",
+    lufsTargetNote: "le repère marque -14 LUFS, cible courante des plateformes de streaming (une convention, pas une norme)",
     truePeak: "Crête réelle",
-    clipWarnNote: "au-dessus du plein échelle — écrêtera lors d'un ré-échantillonnage ou d'un ré-encodage",
+    clipWarnNote: "au-dessus du plein échelle — peut écrêter lors d'un ré-échantillonnage ou d'un ré-encodage en aval",
     headroomNote: "le repère marque la marge de -1 dBTP demandée par l'EBU R128",
+    noOversamplingNote:
+      "à cette fréquence d'échantillonnage, la bibliothèque n'applique aucun sur-échantillonnage : c'est un pic échantillonné, pas une crête inter-échantillon",
     loudnessRange: "Plage de sonie",
     peakRms: "Crête / RMS"
   },
   dynamics: {
     title: "Dynamique",
     dynamicRange: "Plage dynamique",
-    drLabel: (dr) => (dr >= 14 ? "ample" : dr >= 12 ? "bonne" : dr >= 8 ? "modérée" : "fortement compressée"),
-    drNote: (label) => `${label} — échelle DR Pleasurize, celle qu'utilise la base de données loudness-war`,
-    clippedSamples: "Échantillons écrêtés",
-    table: { ch: "Ch", peak: "Crête", rms: "RMS", crest: "Crest", dr: "DR", clipped: "Écrêtés" },
+    drLabel: (dr) => (dr >= 14 ? "très élevée" : dr >= 12 ? "élevée" : dr >= 8 ? "moyenne" : "faible"),
+    drNote: (label) => `${label} — échelle DR Pleasurize, celle qu'utilise la base de données loudness-war. Une mesure conventionnelle, pas une note de qualité.`,
+    clippedRuns: "Passages aplatis",
+    fullScaleNote: (samples) =>
+      `${samples} échantillon(s) au plein échelle au total — un échantillon isolé est un transitoire fort, pas un écrêtage`,
+    table: { ch: "Ch", peak: "Crête", rms: "RMS", crest: "Crest", dr: "DR", fullScale: "Pleine éch.", clipped: "Aplatis" },
     channelsNote:
       "Le facteur de crête est un simple rapport crête/RMS. Le DR est l'algorithme Pleasurize par blocs. Ils mesurent des choses différentes et ne sont pas censés concorder."
   },
@@ -404,10 +470,14 @@ const fr: Dict = {
     groupDeclared: "Ce que le fichier annonce",
     groupSpectrum: "Ce que le spectre montre",
     yes: "oui",
-    no: "non"
+    no: "non",
+    errorPrefix: "Comparaison impossible :",
+    nowPlaying: (filename) => `Lecture : ${filename}`,
+    leads: "valeur en tête pour cette mesure",
+    evidence: "Indices"
   },
   disclaimer:
-    "Nyquist rapporte ce qu'il peut mesurer et le dit clairement quand ce n'est pas suffisant. Le verdict de transcodage repose surtout sur la forme de la pente spectrale, qui ne peut pas détecter un encodage transparent comme LAME V0 ou AAC 256 — un résultat propre n'est pas une preuve de provenance.",
+    "Nyquist rapporte ce qu'il peut mesurer et le dit clairement quand ce n'est pas suffisant. Le verdict de transcodage repose surtout sur la forme de la pente spectrale, qui ne voit pas un encodage transparent comme LAME V0 : sur un fichier à 44,1 kHz sans coupure détectable, « indéterminé » est le résultat honnête et attendu. Un résultat propre n'est jamais une preuve de provenance. La force des indices est une appréciation qualitative, pas une probabilité calibrée.",
   player: {
     play: "Lecture",
     pause: "Pause",
@@ -463,7 +533,7 @@ const en: Dict = {
   verdict: {
     probablyAuthentic: {
       label: "Probably authentic",
-      blurb: "No encoder fingerprint found in the spectrum."
+      blurb: "Positive evidence was measured that rules out a CD-rate lossy source."
     },
     probablyTranscoded: {
       label: "Probably transcoded",
@@ -471,13 +541,14 @@ const en: Dict = {
     },
     indeterminate: {
       label: "Inconclusive",
-      blurb: "Not enough evidence either way. That is a real answer, not a failure."
+      blurb: "No sign of transcoding was found, which is not the same as evidence of authenticity. That is a real answer, not a failure."
     },
     declaredLossy: {
       label: (codec) => `Lossy format (${codecName(codec)})`,
       blurb: "This file is in a lossy format and is not pretending otherwise, so there is nothing to see through. The measurements below still describe it in full."
     },
-    confidence: "confidence"
+    confidence: "evidence strength",
+    strength: { weak: "weak", moderate: "moderate", strong: "strong" }
   },
   // The backend authors these in English already. Handing its own prose straight back keeps
   // the app, `nyquist-cli` and an exported report word-for-word identical, and leaves the
@@ -487,50 +558,73 @@ const en: Dict = {
     checksumMismatchTitle: "Checksum mismatch",
     checksumMismatchDetail:
       "The audio does not match the checksum stored inside the file. It has been truncated, edited, or corrupted since it was created.",
-    damagedPacketsTitle: (n) => `${n} damaged packet${n > 1 ? "s" : ""} skipped`,
-    damagedPacketsDetail:
-      "Part of the file could not be decoded. Every measurement below describes the audio that survived, not the whole track.",
+    incompleteDecodeTitle: (s) =>
+      s.channels_unequal
+        ? "Channels of unequal length"
+        : s.skipped_packets === 0
+          ? "Decoding stopped part-way through the file"
+          : s.stopped_early
+            ? `${s.skipped_packets} packet${s.skipped_packets > 1 ? "s" : ""} skipped, then decoding stopped`
+            : `${s.skipped_packets} damaged packet${s.skipped_packets > 1 ? "s" : ""} skipped`,
+    incompleteDecodeDetail:
+      "Part of the file never reached the analysis, or its channels came out different lengths. Every measurement below describes the audio that survived, not the whole track, and the transcode verdict is withheld for that reason.",
     bitDepthPaddingTitle: (declared, effective) => `${declared}-bit container holding ${effective}-bit audio`,
-    bitDepthPaddingDetail: (effective) =>
-      `Every sample lands exactly on the ${effective}-bit quantization grid, so the extra depth carries no information. The file was padded, not remastered.`,
+    bitDepthPaddingDetail: (effective, activePct) =>
+      `Across the ${activePct}% of samples that are not silent, every one lands exactly on the ${effective}-bit quantization grid, so the extra depth carries no measurable information. That is consistent with padding rather than a genuine remaster. Note that a file properly dithered before padding would escape this test.`,
     upsampledTitle: (declaredKHz, usedKHz) => `${declaredKHz} kHz declared, ${usedKHz} kHz used`,
     upsampledDetail: (pct, sufficientKHz) =>
       `Content stops at ${pct}% of the bandwidth this sample rate exists to carry${
         sufficientKHz ? `. A ${sufficientKHz} kHz file would hold all of it losslessly` : ""
-      }. The audio is intact — the sample rate on the label is inflated.`,
-    clippedSamplesTitle: (n) => `${n} clipped samples`,
-    clippedSamplesDetail: "Samples pinned at full scale, where the waveform was flattened rather than reproduced."
+      }. The audio is intact; this is consistent with upsampling from a lower rate. The measurement allows 10% of slack to absorb resampler ringing.`,
+    clippedRunsTitle: (runs, samples) => `${runs} flattened run(s) at full scale (${samples} samples involved)`,
+    clippedRunsDetail:
+      "Consecutive samples pinned at full scale, which is consistent with clipping — the waveform flattened rather than reproduced. A lone full-scale sample is a loud transient, not clipping, so only sustained runs are counted here. The threshold follows the file's declared bit depth."
+  },
+  errors: {
+    cannotOpen: (raw) => `This file could not be opened. (${raw})`,
+    unsupported: (raw) => `This format is not supported, or the file is corrupt. (${raw})`,
+    noAudio: (raw) => `No decodable audio was found in this file. (${raw})`,
+    playbackUnavailable: (raw) =>
+      `Playback is unavailable: no audio output could be opened. The analysis below is unaffected.${raw ? ` (${raw})` : ""}`,
+    exportSucceeded: (path) => `Report saved to ${path}`,
+    exportFailed: (reason) => `The report could not be saved. ${reason}`
   },
   file: {
     bandwidthUsed: "Bandwidth used",
-    bandwidthPhrase: (used, nyquist) => `${used} of ${nyquist}`
+    bandwidthPhrase: (used, nyquist) => `${used} of ${nyquist}`,
+    bandwidthUnmeasured: "no measurable limit"
   },
   spectrum: {
     title: "Spectrum",
     bandwidth: "Bandwidth",
     rolloffSteepness: "Rolloff steepness",
     noEdgeFound: "no edge found",
+    noLimitMeasured: "no measurable limit",
     steepnessValue: (db, hz) => `${db} dB/kHz @ ${hz}`,
-    note: "Bandwidth is where content stops — the lowpass edge if there is one, otherwise Nyquist. Steepness is what separates an encoder from a dark mix: a codec's lowpass falls off a cliff, a mastering choice slopes away. Click the spectrogram to jump playback there."
+    note: "Bandwidth is where content stops, when that point is measurable; \"no measurable limit\" means the sweep found no stopping point, which is not the same as content running all the way to Nyquist. Steepness is what separates an encoder from a dark mix: a codec's lowpass falls off a cliff, a mastering choice slopes away. Click the spectrogram to jump playback there."
   },
   loudness: {
     title: "Loudness",
     integratedLoudness: "Integrated loudness",
     na: "n/a",
-    lufsTargetNote: "tick marks the -14 LUFS streaming target",
+    lufsTargetNote: "tick marks -14 LUFS, a common streaming platform target (a convention, not a standard)",
     truePeak: "True peak",
-    clipWarnNote: "above full scale — will clip when resampled or re-encoded",
+    clipWarnNote: "above full scale — may clip when resampled or re-encoded downstream",
     headroomNote: "tick marks the -1 dBTP headroom EBU R128 asks for",
+    noOversamplingNote:
+      "at this sample rate the library applies no oversampling, so this is a sampled peak rather than an intersample one",
     loudnessRange: "Loudness range",
     peakRms: "Peak / RMS"
   },
   dynamics: {
     title: "Dynamics",
     dynamicRange: "Dynamic range",
-    drLabel: (dr) => (dr >= 14 ? "wide" : dr >= 12 ? "good" : dr >= 8 ? "moderate" : "heavily compressed"),
-    drNote: (label) => `${label} — Pleasurize DR scale, the one the loudness-war database uses`,
-    clippedSamples: "Clipped samples",
-    table: { ch: "Ch", peak: "Peak", rms: "RMS", crest: "Crest", dr: "DR", clipped: "Clipped" },
+    drLabel: (dr) => (dr >= 14 ? "very high" : dr >= 12 ? "high" : dr >= 8 ? "medium" : "low"),
+    drNote: (label) => `${label} — Pleasurize DR scale, the one the loudness-war database uses. A conventional measurement, not a quality grade.`,
+    clippedRuns: "Flattened runs",
+    fullScaleNote: (samples) =>
+      `${samples} sample(s) at full scale in total — a lone one is a loud transient, not clipping`,
+    table: { ch: "Ch", peak: "Peak", rms: "RMS", crest: "Crest", dr: "DR", fullScale: "Full scale", clipped: "Flattened" },
     channelsNote:
       "Crest factor is a plain peak-to-RMS ratio. DR is the block-based Pleasurize algorithm. They measure different things and are not meant to match."
   },
@@ -592,10 +686,14 @@ const en: Dict = {
     groupDeclared: "What the file claims",
     groupSpectrum: "What the spectrum shows",
     yes: "yes",
-    no: "no"
+    no: "no",
+    errorPrefix: "Cannot compare:",
+    nowPlaying: (filename) => `Playing: ${filename}`,
+    leads: "leading value for this measurement",
+    evidence: "Evidence"
   },
   disclaimer:
-    "Nyquist reports what it can measure and says so when that is not enough. The transcode verdict rests mainly on the shape of the spectral rolloff, which cannot see a transparent encode such as LAME V0 or AAC 256 — a clean result is not proof of provenance.",
+    "Nyquist reports what it can measure and says so when that is not enough. The transcode verdict rests mainly on the shape of the spectral rolloff, which cannot see a transparent encode such as LAME V0: on a 44.1 kHz file with no detectable cutoff, \"indeterminate\" is the honest and expected result. A clean result is never proof of provenance. Evidence strength is a qualitative reading, not a calibrated probability.",
   player: {
     play: "Play",
     pause: "Pause",

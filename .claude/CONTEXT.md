@@ -232,26 +232,61 @@ avant Nyquist → retourne 0.0 (pas de coupure), pas une fausse valeur "raide". 
 est retouché, revalider avec `cargo test corpus_smoke -- --nocapture` et vérifier que les
 cas plein-spectre affichent bien `0`, pas une grande valeur.
 
-## Lecture audio : protocole `asset://`, pas de crate audio Rust
+## Lecture audio : native (rodio), plus rien ne passe par le webview
 
-Décision (revue par rapport au plan initial qui prévoyait `rodio`) : la lecture utilise
-l'élément `<audio>` natif du navigateur + le protocole `asset://` intégré à Tauri, activé
-via `tauri = { features = ["protocol-asset"] }` (Cargo.toml) et
-`app.security.assetProtocol.enable = true` (tauri.conf.json). `rodio` a été retiré
-(ajouté en V0.1, jamais câblé, remplacé par cette approche plus simple).
+`src-tauri/src/player.rs` joue les échantillons que `analysis.rs` vient de décoder. Le
+webview ne reçoit aucun média : `media-src 'none'` dans la CSP.
 
-Mécanisme : `app_handle.asset_protocol_scope().allow_file(&path)` (trait `Manager`,
-`tauri::Manager`) autorise dynamiquement exactement le fichier choisi par l'utilisateur —
-commande IPC `authorize_playback`, appelée juste avant `convertFileSrc(path)` côté
-frontend (`@tauri-apps/api/core`) pour construire l'URL du `<audio src>`. Scope additif,
-par fichier ; rien d'autre sur le disque ne devient lisible. Le webview gère
-seek/buffering nativement (vraies requêtes range sur le fichier), pas de chargement du
-fichier entier en mémoire JS — important pour les gros fichiers 192kHz/24-bit.
+**Deux tentatives précédentes ont échoué, et pour la même raison de fond.** D'abord
+`asset://` (FLAC servi en `audio/x-flac`, que WebKit refuse ; plafond de livraison vers
+32 Mio), puis un serveur HTTP loopback maison qui corrigeait bien le transport. Aucune des
+deux n'a réglé le vrai problème : l'élément `<audio>` se forge **sa propre durée** en
+parsant le fichier, pendant que le curseur, l'axe du spectrogramme et le rapport utilisent
+celle du décodeur. Trois symptômes, une cause — seek qui tombe à côté, compteur qui dérive,
+morceau qui s'arrête tôt. Deux horloges ne se synchronisent pas en améliorant le coursier
+entre elles.
 
-API confirmée en lisant le code source local (`~/.cargo/registry/src/.../tauri-2.11.5/src/lib.rs`
-et `src/scope/mod.rs`) plutôt que de deviner — `protocol-asset` n'est pas une feature Cargo
-par défaut, à activer explicitement.
+Points à connaître avant de toucher `player.rs` :
 
+- **La source ne se termine jamais.** Passé la fin elle renvoie du silence au lieu de `None`,
+  parce qu'une source terminée est une source que rodio abandonne — et on ne peut plus
+  revenir en arrière dedans. Le curseur est épinglé à la fin pour que la position affichée
+  ne file pas.
+- **Lecture entrelacée à la volée** depuis les buffers planaires du décodeur : entrelacer
+  dans un second buffer contigu doublerait le coût mémoire de la piste.
+- **Le curseur est la seule source de vérité.** Position, seek et fin de piste en dérivent.
+  Ne pas réintroduire une durée calculée ailleurs.
+- **La pause de fin de piste se fait dans `Player::with`, pas dans la source** : la source
+  tourne sur le thread audio, où prendre un mutex serait exactement la mauvaise chose.
+- La piste décodée reste en mémoire tant qu'elle est chargée (~10 Mo/minute stéréo en
+  44,1 kHz, ×4 en 96 kHz), là où elle était libérée après l'analyse.
+- Licences : rodio et coreaudio-rs en MIT/Apache-2.0, cpal en Apache-2.0 — compatibles MIT,
+  aucune décision à rouvrir. (ffmpeg aurait été LGPL, et n'est de toute façon pas une
+  bibliothèque de sortie audio.)
+
+## WebKit dit lui-même pourquoi il arrête une lecture
+
+Instrument à connaître avant de formuler la moindre hypothèse sur le lecteur :
+
+```bash
+log stream --style compact --info --debug \
+  --predicate 'process == "nyquist" AND subsystem BEGINSWITH "com.apple.WebKit"'
+```
+
+Le canal `[com.apple.WebKit:Media]` est actif en build release et donne en clair
+`HTMLMediaElement::pauseInternal`, `MediaElementSession::beginInterruption` **avec sa
+raison**, et `updateNowPlayingInfo(… duration = X, now = Y)` toutes les 5 s — durée et
+position sans instrumenter l'app.
+
+Deux pièges de mesure vérifiés, conservés parce qu'ils resservent à quiconque instrumentera
+un jour un `<audio>` : à `volume = 0` dans une page masquée, WebKit suspend la lecture
+(`Suspending silent playback after page visibility: hidden`) — toujours tester avec un volume
+non nul ; et à `playbackRate` élevé il avale tout le fichier d'un coup sur loopback, ce qui ne
+reproduit pas le régime streaming réel.
+
+Les bancs eux-mêmes (`wkplay.swift`, `serve_main.rs`) ont été supprimés en v0.5 : la lecture
+ne passe plus par le webview, il n'y a plus de transport à instrumenter. L'historique complet
+des mesures est dans `.claude/audits/INVESTIGATION-lecture-tronquee.md`.
 ## DR14 : algorithme vérifié depuis l'implémentation de référence, pas des résumés de forum
 
 Les descriptions du DR14 (Pleasurize Music Foundation) sur les forums audiophiles sont

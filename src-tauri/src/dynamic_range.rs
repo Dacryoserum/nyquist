@@ -38,11 +38,17 @@ pub struct DynamicRangeResult {
 pub fn compute_dr14(decoded: &DecodedAudio) -> DynamicRangeResult {
     let block_samples = (BLOCK_SECONDS * decoded.sample_rate as f64).round() as usize;
     if block_samples == 0 {
-        return DynamicRangeResult { dr14: None, per_channel_db: vec![] };
+        return DynamicRangeResult {
+            dr14: None,
+            per_channel_db: vec![],
+        };
     }
 
-    let per_channel_db: Vec<Option<f64>> =
-        decoded.channel_samples.iter().map(|samples| channel_dr(samples, block_samples)).collect();
+    let per_channel_db: Vec<Option<f64>> = decoded
+        .channel_samples
+        .iter()
+        .map(|samples| channel_dr(samples, block_samples))
+        .collect();
 
     let valid: Vec<f64> = per_channel_db.iter().filter_map(|v| *v).collect();
     let dr14 = if valid.is_empty() {
@@ -51,7 +57,10 @@ pub fn compute_dr14(decoded: &DecodedAudio) -> DynamicRangeResult {
         Some((valid.iter().sum::<f64>() / valid.len() as f64).round() as i32)
     };
 
-    DynamicRangeResult { dr14, per_channel_db }
+    DynamicRangeResult {
+        dr14,
+        per_channel_db,
+    }
 }
 
 fn channel_dr(samples: &[f32], block_samples: usize) -> Option<f64> {
@@ -78,7 +87,9 @@ fn channel_dr(samples: &[f32], block_samples: usize) -> Option<f64> {
     // nothing to be "second" to (very short file).
     let peak_2nd = block_peak[seg_cnt.saturating_sub(2).min(seg_cnt - 1)];
 
-    let n_blk = ((seg_cnt as f64 * TOP_FRACTION).floor() as usize).max(1).min(seg_cnt);
+    let n_blk = ((seg_cnt as f64 * TOP_FRACTION).floor() as usize)
+        .max(1)
+        .min(seg_cnt);
     let top = &block_rms[seg_cnt - n_blk..];
     let rms_ref = (top.iter().map(|r| r * r).sum::<f64>() / n_blk as f64).sqrt();
 

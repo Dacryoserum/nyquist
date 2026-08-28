@@ -46,6 +46,8 @@ use rustfft::num_complex::Complex32;
 use rustfft::FftPlanner;
 use serde::Serialize;
 
+#[cfg(test)]
+use crate::decode::DecodeStatus;
 use crate::decode::DecodedAudio;
 
 /// AAC long-block MDCT size. Independent of sample rate — a frame is 1024 coefficients
@@ -129,7 +131,19 @@ impl MdctGridAnalysis {
 /// and averaging the channels back together refills exactly the coefficients the encoder
 /// zeroed. Measured on the corpus, the downmix destroys the peak completely.
 pub fn analyze_mdct_grid(decoded: &DecodedAudio) -> MdctGridAnalysis {
-    let Some(channel) = decoded.channel_samples.first() else {
+    // The most energetic channel, not the first. Still one channel rather than a downmix,
+    // for the reason above — but a file whose first channel is silent (a mono source laid
+    // into one side, an intro that enters on the right) would otherwise be swept on nothing
+    // at all and report a clean result it never actually measured.
+    let Some(channel) = decoded
+        .channel_samples
+        .iter()
+        .filter(|c| !c.is_empty())
+        .max_by(|a, b| {
+            let energy = |c: &[f32]| c.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+            energy(a).total_cmp(&energy(b))
+        })
+    else {
         return MdctGridAnalysis::not_analyzed();
     };
     if channel.len() < MIN_SAMPLES {
@@ -150,7 +164,13 @@ pub fn analyze_mdct_grid(decoded: &DecodedAudio) -> MdctGridAnalysis {
 
     let mut zero_fractions = Vec::with_capacity(n);
     for offset in 0..n {
-        zero_fractions.push(zero_fraction(channel, &starts, offset, &mut mdct, &mut coefficients));
+        zero_fractions.push(zero_fraction(
+            channel,
+            &starts,
+            offset,
+            &mut mdct,
+            &mut coefficients,
+        ));
     }
 
     let (best_offset, &best) = zero_fractions
@@ -171,8 +191,13 @@ pub fn analyze_mdct_grid(decoded: &DecodedAudio) -> MdctGridAnalysis {
     // Re-measure the winner over more frames: the sweep only had to rank offsets, but the
     // number that gets compared to a threshold should rest on more than a dozen frames.
     let confirm_starts = pick_loud_frame_starts(channel, n, CONFIRM_FRAMES);
-    let confirmed =
-        zero_fraction(channel, &confirm_starts, best_offset, &mut mdct, &mut coefficients);
+    let confirmed = zero_fraction(
+        channel,
+        &confirm_starts,
+        best_offset,
+        &mut mdct,
+        &mut coefficients,
+    );
 
     let z_score = ((best as f64) - median as f64) / sigma as f64;
 
@@ -207,14 +232,20 @@ fn pick_loud_frame_starts(channel: &[f32], n: usize, wanted: usize) -> Vec<usize
         (frame.iter().map(|&s| s * s).sum::<f32>() / frame.len() as f32).sqrt()
     };
 
-    let levels: Vec<(usize, f32)> = (0..candidate_count).map(|i| (i * n, rms_of(i * n))).collect();
+    let levels: Vec<(usize, f32)> = (0..candidate_count)
+        .map(|i| (i * n, rms_of(i * n)))
+        .collect();
     let loudest = levels.iter().map(|&(_, r)| r).fold(0.0f32, f32::max);
     if loudest <= 0.0 {
         return Vec::new();
     }
     let floor = loudest * 10f32.powf(SILENT_FRAME_DB / 20.0);
 
-    let loud: Vec<usize> = levels.iter().filter(|&&(_, r)| r > floor).map(|&(s, _)| s).collect();
+    let loud: Vec<usize> = levels
+        .iter()
+        .filter(|&&(_, r)| r > floor)
+        .map(|&(s, _)| s)
+        .collect();
     if loud.is_empty() {
         return Vec::new();
     }
@@ -251,7 +282,10 @@ fn zero_fraction(
         }
         let rms = (energy / n as f32).sqrt();
         let threshold = rms * ratio;
-        zeros += coefficients.iter().filter(|&&c| c.abs() < threshold).count();
+        zeros += coefficients
+            .iter()
+            .filter(|&&c| c.abs() < threshold)
+            .count();
         counted += n;
     }
 
@@ -301,15 +335,21 @@ impl MdctTransform {
     /// magnitude too slow at that rate. Verified against the direct form in this module's
     /// tests.
     fn transform(&mut self, input: &[f32], out: &mut [f32]) {
-        for (slot, ((&x, &w), &p)) in self
-            .scratch
-            .iter_mut()
-            .zip(self.window.iter().zip(input.iter()).map(|(w, x)| (x, w)).zip(self.pre.iter()))
-        {
+        for (slot, ((&x, &w), &p)) in self.scratch.iter_mut().zip(
+            self.window
+                .iter()
+                .zip(input.iter())
+                .map(|(w, x)| (x, w))
+                .zip(self.pre.iter()),
+        ) {
             *slot = p * (x * w);
         }
-        self.fft.process_with_scratch(&mut self.scratch, &mut self.fft_scratch);
-        for (o, (&y, &p)) in out.iter_mut().zip(self.scratch[..self.n].iter().zip(self.post.iter())) {
+        self.fft
+            .process_with_scratch(&mut self.scratch, &mut self.fft_scratch);
+        for (o, (&y, &p)) in out
+            .iter_mut()
+            .zip(self.scratch[..self.n].iter().zip(self.post.iter()))
+        {
             *o = (y * p).re;
         }
     }
@@ -344,8 +384,10 @@ fn twiddles(n: usize) -> (Vec<Complex32>, Vec<Complex32>) {
 fn encode_profile(zero_fractions: &[f32], peak: f32) -> String {
     use base64::Engine;
     let scale = if peak > 0.0 { 255.0 / peak } else { 0.0 };
-    let bytes: Vec<u8> =
-        zero_fractions.iter().map(|&v| (v * scale).clamp(0.0, 255.0) as u8).collect();
+    let bytes: Vec<u8> = zero_fractions
+        .iter()
+        .map(|&v| (v * scale).clamp(0.0, 255.0) as u8)
+        .collect();
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
@@ -374,8 +416,9 @@ mod tests {
 
         // Deterministic pseudo-random input; the exact values do not matter, only that they
         // are not symmetric in a way that could hide an indexing error.
-        let input: Vec<f32> =
-            (0..2 * n).map(|i| ((i * 37 % 101) as f32 / 50.0 - 1.0) * (i as f32 * 0.7).sin()).collect();
+        let input: Vec<f32> = (0..2 * n)
+            .map(|i| ((i * 37 % 101) as f32 / 50.0 - 1.0) * (i as f32 * 0.7).sin())
+            .collect();
 
         let mut fast = vec![0.0f32; n];
         mdct.transform(&input, &mut fast);
@@ -423,7 +466,12 @@ mod tests {
             channel_samples: vec![samples],
             integrity_verified: None,
             encoder_tag_matches: Vec::new(),
-            decode_errors: 0,
+            decode_status: DecodeStatus {
+                complete: true,
+                skipped_packets: 0,
+                stopped_early: false,
+                channels_unequal: false,
+            },
         };
 
         let result = analyze_mdct_grid(&decoded);

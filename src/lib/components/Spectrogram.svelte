@@ -15,7 +15,9 @@
     showPalette = true
   }: {
     data: SpectrogramData;
-    spectralCutoffHz: number;
+    /** `undefined` when nothing bounded the content: no line is drawn, rather than one at a
+     * frequency no measurement supports. */
+    spectralCutoffHz?: number;
     cutoffOverTimeHz?: number[];
     currentTimeSeconds?: number;
     onSeek?: (seconds: number) => void;
@@ -35,7 +37,11 @@
   }
 
   /** Keyboard equivalent of click-to-seek: a click position doesn't map to a key, so this
-   * nudges/jumps instead (arrows: 5s, Home/End: start/end) rather than being a no-op. */
+   * nudges/jumps instead (arrows: 5s, Home/End: start/end) rather than being a no-op.
+   *
+   * Reachable only when `onSeek` exists — the container was previously focusable and
+   * announced as a button on both spectrograms in the comparison view, where neither can
+   * seek, so every key press landed on a control that did nothing. */
   function handleSeekKeydown(event: KeyboardEvent) {
     if (!onSeek) return;
     const clamp = (t: number) => Math.min(data.duration_seconds, Math.max(0, t));
@@ -102,8 +108,9 @@
   });
 
   function fmtTime(seconds: number): string {
+    // `Math.floor`, not `Math.round`: rounding 59.6 s produced "0:60".
     const m = Math.floor(seconds / 60);
-    const s = Math.round(seconds % 60);
+    const s = Math.floor(seconds % 60);
     return `${m}:${s.toString().padStart(2, "0")}`;
   }
 
@@ -117,8 +124,33 @@
   const freqLabels = $derived(
     [1, 0.75, 0.5, 0.25, 0].map((f) => fmtFreq(data.max_frequency_hz * f))
   );
+  /** The interactive role, or nothing at all.
+   *
+   * Applied as one spread because the parts are one decision: a container that cannot seek
+   * must be neither focusable nor announced as a control. It used to carry `role="button"`
+   * and `tabindex="0"` unconditionally, which put both spectrograms in the comparison view
+   * into the tab order as buttons that do nothing. `slider` rather than `button` because the
+   * arrow/Home/End keys it handles are slider semantics, and a screen reader can then read
+   * the position out.
+   *
+   * A spread also keeps Svelte's a11y lint from reading the role and the tabindex separately
+   * and concluding a non-interactive element was given focus. */
+  const seekRole = $derived(
+    onSeek
+      ? {
+          role: "slider",
+          tabindex: 0,
+          "aria-label": T.spectrogram.seekAria,
+          "aria-valuemin": 0,
+          "aria-valuemax": Math.round(data.duration_seconds),
+          "aria-valuenow": Math.round(currentTimeSeconds),
+          "aria-valuetext": fmtTime(currentTimeSeconds)
+        }
+      : {}
+  );
+
   const cutoffLinePercent = $derived(
-    100 - (spectralCutoffHz / data.max_frequency_hz) * 100
+    spectralCutoffHz !== undefined ? 100 - (spectralCutoffHz / data.max_frequency_hz) * 100 : null
   );
   const playheadPercent = $derived(
     data.duration_seconds > 0 ? (currentTimeSeconds / data.duration_seconds) * 100 : 0
@@ -150,14 +182,14 @@
       bind:this={canvasWrap}
       onclick={handleSeekClick}
       onkeydown={handleSeekKeydown}
-      role="button"
-      aria-label={T.spectrogram.seekAria}
-      tabindex={0}
+      {...seekRole}
     >
       <canvas bind:this={canvas} aria-label={T.spectrogram.canvasAria}></canvas>
-      <div class="cutoff-line" style:top="{cutoffLinePercent}%">
-        <span class="cutoff-label">{T.spectrogram.rawCutoff(fmtFreq(spectralCutoffHz))}</span>
-      </div>
+      {#if cutoffLinePercent !== null && spectralCutoffHz !== undefined}
+        <div class="cutoff-line" style:top="{cutoffLinePercent}%">
+          <span class="cutoff-label">{T.spectrogram.rawCutoff(fmtFreq(spectralCutoffHz))}</span>
+        </div>
+      {/if}
       {#if cutoffOverTimePoints}
         <svg class="cutoff-trace" viewBox="0 0 100 100" preserveAspectRatio="none">
           <polyline points={cutoffOverTimePoints} />

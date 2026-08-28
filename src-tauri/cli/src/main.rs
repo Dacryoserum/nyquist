@@ -13,7 +13,11 @@ fn main() -> ExitCode {
 
     if args.is_empty() || args.iter().any(|a| a == "-h" || a == "--help") {
         print_usage();
-        return if args.is_empty() { ExitCode::FAILURE } else { ExitCode::SUCCESS };
+        return if args.is_empty() {
+            ExitCode::FAILURE
+        } else {
+            ExitCode::SUCCESS
+        };
     }
 
     let json_output = args.iter().any(|a| a == "--json");
@@ -63,7 +67,11 @@ fn main() -> ExitCode {
         }
     }
 
-    if any_failed { ExitCode::FAILURE } else { ExitCode::SUCCESS }
+    if any_failed {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
 }
 
 fn print_usage() {
@@ -90,10 +98,15 @@ fn print_human_readable(r: &AnalysisResult) {
 
     println!("{}", fi.filename);
     println!("  Container/codec:   {} / {}", fi.container, fi.codec);
-    println!("  Sample rate:       {} Hz (Nyquist {} Hz)", fi.sample_rate_hz, fi.nyquist_hz);
+    println!(
+        "  Sample rate:       {} Hz (Nyquist {} Hz)",
+        fi.sample_rate_hz, fi.nyquist_hz
+    );
     println!(
         "  Bit depth/chans:   {}, {}ch",
-        fi.bit_depth.map(|b| format!("{b}-bit")).unwrap_or_else(|| "unknown".to_string()),
+        fi.bit_depth
+            .map(|b| format!("{b}-bit"))
+            .unwrap_or_else(|| "unknown".to_string()),
         fi.channels
     );
     println!("  Duration:          {}", fmt_duration(fi.duration_seconds));
@@ -104,34 +117,63 @@ fn print_human_readable(r: &AnalysisResult) {
             Some(false) => "FAILED (checksum mismatch)",
             None => "n/a",
         },
-        if fi.decode_errors > 0 {
-            format!(
-                " ⚠ {} packet(s) failed to decode and were skipped — measurements below \
-                 describe incomplete audio",
-                fi.decode_errors
-            )
-        } else {
+        if fi.decode_status.complete {
             String::new()
+        } else {
+            format!(
+                " ⚠ incomplete decode ({} packet(s) skipped{}) — measurements below describe \
+                 only the audio that survived, and the verdict is withheld",
+                fi.decode_status.skipped_packets,
+                if fi.decode_status.stopped_early {
+                    ", stream ended early"
+                } else {
+                    ""
+                }
+            )
         }
     );
-    println!("  Peak / True peak:  {:.1} dBFS / {:.1} dBTP", sa.peak_dbfs, sa.true_peak_dbtp);
+    println!(
+        "  Peak / True peak:  {:.1} dBFS / {:.1} {}",
+        sa.peak_dbfs,
+        sa.true_peak_dbtp,
+        // At 192 kHz and above `ebur128` does no oversampling, so the figure is a sampled
+        // peak and must not wear a true-peak label — see signal_analysis.rs.
+        if sa.true_peak_oversampling > 1 {
+            format!("dBTP ({}x oversampled)", sa.true_peak_oversampling)
+        } else {
+            "dBFS sampled peak (no oversampling at this rate)".to_string()
+        }
+    );
     println!("  RMS:               {:.1} dBFS", sa.rms_dbfs);
     println!(
         "  LUFS / LRA:        {} / {}",
-        sa.lufs_integrated.map(|v| format!("{v:.1} LUFS")).unwrap_or_else(|| "n/a".to_string()),
-        sa.loudness_range_lu.map(|v| format!("{v:.1} LU")).unwrap_or_else(|| "n/a".to_string())
+        sa.lufs_integrated
+            .map(|v| format!("{v:.1} LUFS"))
+            .unwrap_or_else(|| "n/a".to_string()),
+        sa.loudness_range_lu
+            .map(|v| format!("{v:.1} LU"))
+            .unwrap_or_else(|| "n/a".to_string())
     );
-    println!("  Clipped samples:   {}", sa.clipping_count_total);
+    println!(
+        "  Full-scale/clipped: {} sample(s) on the top step, {} flattened run(s)",
+        sa.full_scale_sample_count_total, sa.clipped_run_count_total
+    );
     println!(
         "  Dynamic range:     {}",
-        r.dynamic_range.dr14.map(|v| format!("DR{v}")).unwrap_or_else(|| "n/a".to_string())
+        r.dynamic_range
+            .dr14
+            .map(|v| format!("DR{v}"))
+            .unwrap_or_else(|| "n/a".to_string())
     );
     if let Some(declared) = r.bit_depth_analysis.declared_bit_depth {
-        let effective = r.bit_depth_analysis.effective_bit_depth;
-        let note = match effective {
-            Some(eff) if eff < declared => {
-                format!(" ⚠ only {eff}-bit of real information detected, likely padded")
-            }
+        let bd = &r.bit_depth_analysis;
+        let note = match bd.effective_bit_depth {
+            Some(eff) if eff < declared => format!(
+                " ⚠ only {eff}-bit of real information in the {:.1}% of samples that are not \
+                 silent — consistent with padding rather than a genuine remaster",
+                bd.active_sample_ratio * 100.0
+            ),
+            None => " (not verifiable on this file)".to_string(),
             _ => String::new(),
         };
         println!("  Bit depth check:   declared {declared}-bit{note}");
@@ -140,24 +182,33 @@ fn print_human_readable(r: &AnalysisResult) {
     if sr.likely_upsampled {
         println!(
             "  Sample rate check: ⚠ declared {} Hz but content stops at {:.1} kHz ({:.0}% of \
-             available bandwidth){}",
+             available bandwidth) — consistent with upsampling{}",
             sr.declared_sample_rate_hz,
-            sr.content_bandwidth_hz / 1000.0,
-            sr.bandwidth_ratio * 100.0,
+            sr.content_bandwidth_hz.unwrap_or_default() / 1000.0,
+            sr.bandwidth_ratio.unwrap_or_default() * 100.0,
             sr.sufficient_sample_rate_hz
-                .map(|rate| format!(" — {rate} Hz would carry this losslessly"))
+                .map(|rate| format!("; {rate} Hz would carry this losslessly"))
                 .unwrap_or_default()
         );
     }
     println!(
-        "  Spectral cutoff:   {:.1} kHz (rolloff {:.0} dB/kHz{})",
-        spa.spectral_cutoff_hz / 1000.0,
+        "  Spectral cutoff:   {} (rolloff {:.0} dB/kHz{})",
+        // `None` means nothing bounded the content — a different statement from "reaches
+        // Nyquist", and not one to print as a frequency.
+        spa.spectral_cutoff_hz
+            .map(|hz| format!("{:.1} kHz", hz / 1000.0))
+            .unwrap_or_else(|| "no measurable limit".to_string()),
         spa.rolloff_steepness_db_per_khz,
-        spa.stopband_depth_db.map(|db| format!(", stopband {db:.0} dB down")).unwrap_or_default()
+        spa.stopband_depth_db
+            .map(|db| format!(", stopband {db:.0} dB down"))
+            .unwrap_or_default()
     );
     // Reported, not scored — see spectral.rs on why cutoff stability does not separate a
     // codec's lowpass from a mastering one.
-    println!("  Cutoff stability:  ±{:.0} Hz over the track", spa.cutoff_stability_hz);
+    println!(
+        "  Cutoff stability:  ±{:.0} Hz over the track",
+        spa.cutoff_stability_hz
+    );
     if let Some(st) = &r.stereo_analysis {
         let flag = if st.dual_mono {
             " ⚠ dual mono (channels are bit-identical)"
@@ -181,14 +232,41 @@ fn print_human_readable(r: &AnalysisResult) {
             grid.frame_offset,
             grid.zero_fraction_at_offset * 100.0,
             grid.zero_fraction_baseline * 100.0,
-            if grid.grid_detected { " ⚠ AAC encoder grid" } else { "" }
+            if grid.grid_detected {
+                " ⚠ AAC encoder grid"
+            } else {
+                ""
+            }
         );
     }
-    println!("  Verdict:           {:?} (confidence {:.0}%)", ta.verdict, ta.confidence_score * 100.0);
+    println!(
+        "  Verdict:           {:?}{}",
+        ta.verdict,
+        // Strength of evidence, not a probability — the numbers are heuristic weights tuned
+        // on a small corpus, and a percentage claims a precision they do not have.
+        // `None` for `DeclaredLossy`, where the container states the answer outright.
+        ta.confidence_score
+            .map(|c| format!(" (evidence: {})", evidence_strength(c)))
+            .unwrap_or_default()
+    );
     for indicator in &ta.indicators {
         // `message` rather than the structured detail beside it: the CLI is English-only by
         // design, and this is the same prose the JSON report carries.
         println!("    - {}", indicator.message);
     }
     println!();
+}
+
+/// Renders a confidence weight as the qualitative band it actually supports.
+///
+/// The underlying numbers (0.25, 0.3, 0.7, 0.9, ...) are heuristic weights tuned on a
+/// twenty-fixture corpus, not calibrated probabilities. Printing "90%" implied a precision
+/// that no held-out validation set backs up. The raw value stays in the JSON report, where a
+/// reader can see it for what it is.
+fn evidence_strength(confidence: f64) -> &'static str {
+    match confidence {
+        c if c >= 0.85 => "strong",
+        c if c >= 0.6 => "moderate",
+        _ => "weak",
+    }
 }

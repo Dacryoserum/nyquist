@@ -91,13 +91,18 @@ pub fn analyze_stereo(decoded: &DecodedAudio) -> Option<StereoAnalysis> {
         mid_energy += mid * mid;
         side_energy += side * side;
     }
-    let side_to_mid_db = energy_ratio_db(side_energy, mid_energy);
+    // Two values, because the displayed one is clamped and the test must not be. Comparing
+    // the clamped figure against the clamp made `effectively_mono` unreachable: the ratio can
+    // never read below the floor it is pinned to, so `side_to_mid_db < SIDE_NEGLIGIBLE_DB`
+    // was false for every file ever analysed.
+    let raw_side_to_mid_db = raw_energy_ratio_db(side_energy, mid_energy);
+    let side_to_mid_db = raw_side_to_mid_db.max(SIDE_NEGLIGIBLE_DB);
 
     Some(StereoAnalysis {
         correlation,
         side_to_mid_db,
         dual_mono,
-        effectively_mono: !dual_mono && side_to_mid_db < SIDE_NEGLIGIBLE_DB,
+        effectively_mono: !dual_mono && raw_side_to_mid_db <= SIDE_NEGLIGIBLE_DB,
         mono_compatibility_risk: correlation < 0.0,
         per_band: per_band_stereo(left, right, decoded.sample_rate),
     })
@@ -131,16 +136,30 @@ fn pearson(a: &[f32], b: &[f32]) -> f64 {
     (cov / (va.sqrt() * vb.sqrt())).clamp(-1.0, 1.0)
 }
 
-fn energy_ratio_db(numerator: f64, denominator: f64) -> f64 {
+/// The side/mid ratio as measured, with no display floor applied.
+///
+/// Callers that show the number clamp it themselves; callers that *test* it must not, or the
+/// test compares a value against the bound it was just pinned to.
+fn raw_energy_ratio_db(numerator: f64, denominator: f64) -> f64 {
     if denominator <= 0.0 {
-        // No mid at all: either silence, or a purely out-of-phase file. Both are better
-        // described by the floor than by an infinity the UI would have to special-case.
-        return if numerator > 0.0 { 0.0 } else { SIDE_NEGLIGIBLE_DB };
+        // No mid at all: either silence, or a purely out-of-phase file. The first is not
+        // mono-like and the second is the opposite of it, so neither may read as negligible.
+        return if numerator > 0.0 {
+            0.0
+        } else {
+            SIDE_NEGLIGIBLE_DB
+        };
     }
     if numerator <= 0.0 {
-        return SIDE_NEGLIGIBLE_DB;
+        // No side energy whatsoever: as mono as a non-bit-identical pair can be.
+        return f64::NEG_INFINITY;
     }
-    (10.0 * (numerator / denominator).log10()).max(SIDE_NEGLIGIBLE_DB)
+    10.0 * (numerator / denominator).log10()
+}
+
+/// [`raw_energy_ratio_db`] clamped to the display floor.
+fn energy_ratio_db(numerator: f64, denominator: f64) -> f64 {
+    raw_energy_ratio_db(numerator, denominator).max(SIDE_NEGLIGIBLE_DB)
 }
 
 /// Per-band side/mid, via one FFT pass over mid and side rather than a filter bank: the
@@ -203,4 +222,72 @@ fn per_band_stereo(left: &[f32], right: &[f32], sample_rate: u32) -> Vec<BandSte
             }
         })
         .collect()
+}
+#[cfg(test)]
+fn decoded_for_test(sample_rate: u32, bits: Option<u32>, channels: Vec<Vec<f32>>) -> DecodedAudio {
+    DecodedAudio {
+        sample_rate,
+        channels: channels.len(),
+        codec_short_name: "flac".into(),
+        container_short_name: "flac".into(),
+        bits_per_sample: bits,
+        channel_samples: channels,
+        integrity_verified: None,
+        encoder_tag_matches: Vec::new(),
+        decode_status: crate::decode::DecodeStatus {
+            complete: true,
+            skipped_packets: 0,
+            stopped_early: false,
+            channels_unequal: false,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `effectively_mono` was unreachable for every file ever analysed: the test compared the
+    /// side/mid ratio against the very floor the display path had just clamped it to, so
+    /// `side_to_mid_db < SIDE_NEGLIGIBLE_DB` could never hold.
+    #[test]
+    fn a_barely_wide_file_reads_as_effectively_mono() {
+        // Identical but for one sample one LSB apart, so `dual_mono` (an exact claim) is
+        // false while the side channel is far below the negligible floor.
+        let left: Vec<f32> = (0..8192).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let mut right = left.clone();
+        right[4096] += 1.0 / 32768.0;
+
+        let stereo = analyze_stereo(&decoded_for_test(44_100, Some(16), vec![left, right]))
+            .expect("two channels should be analyzable");
+
+        assert!(
+            !stereo.dual_mono,
+            "one differing sample means not bit-identical"
+        );
+        assert!(
+            stereo.effectively_mono,
+            "a side channel this far down must read as effectively mono; side/mid was {} dB",
+            stereo.side_to_mid_db
+        );
+        assert!(
+            stereo.side_to_mid_db >= SIDE_NEGLIGIBLE_DB,
+            "the *displayed* value stays clamped to the floor"
+        );
+    }
+
+    /// The other direction: a genuinely wide file must not be swept up by the fix above.
+    #[test]
+    fn a_wide_file_is_not_effectively_mono() {
+        let left: Vec<f32> = (0..8192).map(|i| (i as f32 * 0.01).sin() * 0.5).collect();
+        let right: Vec<f32> = (0..8192).map(|i| (i as f32 * 0.013).sin() * 0.5).collect();
+
+        let stereo = analyze_stereo(&decoded_for_test(44_100, Some(16), vec![left, right]))
+            .expect("two channels should be analyzable");
+        assert!(
+            !stereo.effectively_mono,
+            "side/mid was {} dB",
+            stereo.side_to_mid_db
+        );
+    }
 }

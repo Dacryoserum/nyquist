@@ -6,6 +6,166 @@ releases start shipping.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-28
+
+Une version de correction. Elle ne cache plus rien : le verdict refuse de cautionner ce
+qu'il ne peut pas voir, la lecture ne dépend plus du navigateur, et les mesures qui
+n'étaient pas mesurées le disent.
+
+### Modifié
+
+- **La lecture ne passe plus par le navigateur.** L'audio est joué nativement, à partir des
+  échantillons que l'analyse vient de décoder. L'élément `<audio>` du webview se forgeait sa
+  propre idée de la durée du fichier, en parsant le fichier de son côté, pendant que le
+  curseur, l'axe du spectrogramme et le rapport utilisaient celle mesurée par le décodeur.
+  Trois symptômes découlaient de cette seule divergence : un clic sur le spectrogramme
+  tombait à côté, le compteur dérivait, et les morceaux longs s'arrêtaient avant la fin.
+  Deux transports successifs (`asset://` puis un serveur HTTP local) avaient été essayés
+  avant de comprendre que le problème n'était pas le transport : deux horloges ne se
+  synchronisent pas en améliorant le coursier entre elles. Il n'y en a plus qu'une —
+  un index d'échantillon dans la piste décodée — et chaque chiffre affiché en découle.
+  Le seek est désormais exact à l'échantillon près.
+
+- **Un fichier sans indice de transcodage n'est plus déclaré « probablement authentique ».**
+  Ne rien trouver n'est pas la même chose que trouver que tout va bien. Un encodage MP3
+  transparent (LAME V0) ne coupe pas les aigus du tout, et l'outil rendait pourtant un verdict
+  rassurant sur les deux fichiers de ce type de son propre corpus de test — le pire résultat
+  possible pour un outil dont le rôle est de repérer un mensonge. Ces fichiers ressortent
+  maintenant en « indéterminé ». « Probablement authentique » demande désormais une preuve
+  positive : du contenu réel dans le haut d'une bande hi-res, qu'aucun encodage à la fréquence
+  du CD n'aurait pu y mettre. Sur le corpus : aucun fichier réellement transcodé n'est plus
+  cautionné, et toujours zéro faux positif.
+- **La confiance s'affiche comme une force d'indices — faible, modérée, forte — et non plus en
+  pourcentage.** Les nombres sous-jacents sont des poids réglés sur vingt fichiers de test, pas
+  des probabilités calibrées ; « 90 % » laissait croire à une précision qui n'existe pas. Le
+  nombre brut reste dans le rapport JSON exporté.
+- **Un décodage incomplet suspend le verdict.** Si des paquets ont été sautés, ou si le flux
+  s'est arrêté en cours de route, les mesures ne décrivent qu'un fragment : elles restent
+  affichées, mais l'outil ne rend plus de jugement sur le fichier entier.
+- **La bande passante non mesurable s'affiche comme telle.** Quand le balayage ne trouve aucun
+  point où le contenu s'arrête, l'app le dit, au lieu de reporter la fréquence de Nyquist comme
+  si elle avait été mesurée — ce qui présentait un morceau uniquement grave comme occupant
+  100 % de sa bande.
+- **Les échantillons au plein échelle et les passages réellement écrêtés sont comptés
+  séparément.** Un échantillon isolé qui touche le plafond est un transitoire fort ; ce sont les
+  suites d'échantillons plaqués qui signalent une forme d'onde aplatie. Le seuil suit aussi la
+  profondeur déclarée du fichier : en 24 bits, l'ancien seuil fixe comptait les 256 valeurs les
+  plus hautes comme écrêtées.
+- **Les formulations catégoriques ont été nuancées.** « Le fichier a été rembourré » devient
+  « c'est compatible avec un rembourrage » ; les repères -14 LUFS et DR 12 sont présentés comme
+  des conventions, pas comme des notes.
+
+### Ajouté
+
+- **Le rapport exporté indique la version du pipeline qui l'a produit.** Les seuils et la
+  logique de verdict évoluent d'une version à l'autre ; sans cela un rapport relu plus tard
+  n'est pas interprétable.
+- **Lecture des fichiers Opus** (`.opus`, `.oga`), qui manquaient au sélecteur alors que le
+  moteur d'analyse les décodait déjà.
+
+### Corrigé
+
+- **La plage de sonie (LRA) n'est plus affichée sur des fichiers trop courts.** En dessous de
+  dix secondes, la fenêtre glissante de trois secondes de l'EBU Tech 3342 ne voit pas assez de
+  matière distincte, et la bibliothèque renvoyait un 0.0 qui s'affichait comme une mesure.
+- **La détection de « faux hi-res » ne se laisse plus décider par le silence.** Le silence
+  numérique tombe sur toutes les grilles de quantification à la fois : un vrai master 24 bits
+  contenant un long passage muet était signalé comme du 16 bits rembourré. La mesure ne porte
+  plus que sur les échantillons actifs, et se tait quand il n'y en a pas assez.
+- **L'indicateur « mono de fait » ne se déclenchait jamais.** Le test comparait le rapport
+  side/mid à la valeur plancher à laquelle l'affichage venait de l'écrêter, donc il était faux
+  pour tous les fichiers.
+- **Une erreur de la bibliothèque de mesure ne se transforme plus en -120 dBTP.** La crête
+  réelle est aussi étiquetée correctement à 192 kHz et au-delà, où aucun sur-échantillonnage
+  n'est appliqué : c'est un pic échantillonné, pas une crête inter-échantillon.
+- **Deux analyses lancées coup sur coup ne mélangent plus leurs résultats.** Chaque analyse
+  porte un jeton, et une réponse qui arrive après qu'une autre a démarré est ignorée au lieu
+  d'écrire par-dessus le rapport affiché.
+- **Une lecture impossible n'efface plus un rapport valide.** Analyse et lecture sont deux
+  résultats distincts : le rapport s'affiche dès que l'analyse aboutit, et l'échec de lecture
+  est signalé à part, près du lecteur.
+- **Les échecs de lecture sont enfin visibles.** Un refus de `play()`, un format que le lecteur
+  ne sait pas décoder, une lecture qui cale : chacun affiche maintenant un message au lieu
+  d'échouer en silence.
+- **L'export JSON signale les erreurs et confirme le succès**, au lieu de laisser croire que le
+  fichier a été écrit.
+- **Le curseur de progression ne saute plus pendant une navigation au clavier.** Le verrou
+  n'était armé que par le pointeur.
+- **Le bouton muet restaure le volume précédent** quand le curseur a été descendu à zéro.
+- **Une durée ne s'affiche plus « 0:60 ».**
+- **Une erreur de comparaison s'affiche près de la comparaison**, au lieu de prendre la place du
+  message d'erreur principal.
+- **Des canaux de longueurs différentes sont signalés.** Ils ne l'étaient nulle part, alors que
+  chaque section du rapport en tirait une longueur différente : la durée lisait le premier
+  canal, le spectre et la stéréo le plus court. Le fichier est désormais marqué comme
+  incomplet, et le verdict suspendu avec.
+- **La grille MDCT s'analyse sur le canal le plus énergétique**, pas sur le premier. Un fichier
+  dont le premier canal est muet était balayé sur du silence et rendait un résultat propre
+  qu'il n'avait jamais mesuré.
+- **Une lecture indisponible dit pourquoi.** L'échec du chargement était avalé : l'interface
+  affichait « indisponible » sans jamais nommer la cause.
+
+### Sécurité
+
+- **L'URL de lecture ne contient plus de chemin de fichier.** L'autorisation ouvre le fichier et
+  l'URL désigne ce descripteur ouvert par un identifiant aléatoire. Il n'existe donc plus aucun
+  nom à détourner entre le contrôle et la lecture : remplacer un lien symbolique après coup ne
+  peut plus faire servir un autre fichier. Un fichier réécrit sous l'URL n'est pas servi non
+  plus — l'URL est retirée, pour qu'un cache ne puisse jamais rendre un contenu périmé.
+- **Le serveur de lecture démarre sous Windows.** Il tirait son jeton aléatoire de
+  `/dev/urandom`, un chemin qui n'existe pas là-bas : l'application plantait au lancement avant
+  d'afficher quoi que ce soit. Un échec de démarrage ne fait d'ailleurs plus planter l'app du
+  tout — l'analyse fonctionne, seule la lecture est signalée indisponible.
+- **Le serveur de lecture ne peut plus être saturé par un processus local.** Nombre de
+  connexions simultanées plafonné, taille des requêtes bornée, délai d'écriture, et une
+  requête malformée reçoit une réponse d'erreur au lieu de faire déborder un calcul : une plage
+  d'octets inversée (`bytes=100-50`) provoquait un dépassement de capacité.
+
+### Corrigé (lecture audio)
+
+- **Un morceau long s'arrêtait avant la fin, sans erreur ni message.** Le webview concluait
+  que le fichier se terminait là où le son s'était tu — il révisait même sa propre estimation
+  de la durée. Trois choses s'additionnaient. Tauri annonçait les FLAC en `audio/x-flac`, une
+  forme ancienne que WebKit ne reconnaît pas et qui le pousse à deviner la durée en reniflant
+  le flux. Le protocole `asset://` comme un schéma d'URI maison plafonnaient la livraison vers
+  32 Mio, ce qui coupait la dernière minute d'un fichier de 38 Mio. Enfin, les réponses
+  interdisaient toute mise en cache : comme macOS demande à une page passée en arrière-plan
+  d'être économe, WebKit jetait ce qu'il avait téléchargé et devait tout redemander, sans
+  filet. L'audio passe maintenant par un petit serveur local, avec le type MIME que WebKit
+  attend, des réponses qu'il a le droit de garder, et des connexions réutilisées d'une plage
+  à la suivante plutôt qu'une trentaine de connexions par morceau. À noter : ce qui est
+  mesuré, c'est que ce transport livre le fichier entier là où les deux autres ne le
+  faisaient pas. Le mécanisme exact à l'intérieur de WebKit reste une hypothèse, pas une
+  cause démontrée — voir `.claude/audits/INVESTIGATION-lecture-tronquee.md`.
+- **Le lecteur se relève d'une fin prématurée.** L'analyse mesure la durée exacte du fichier,
+  donc l'app peut reconnaître une fin qui arrive trop tôt : elle recharge alors la source et
+  reprend là où le son s'était arrêté. Cinq fois au plus, et toujours vers l'avant, pour qu'un
+  fichier qui se termine vraiment tôt ne tourne pas en boucle. C'est un contournement, pas une
+  correction : si les reprises s'épuisent sans atteindre la fin, l'app le dit maintenant au
+  lieu de laisser la lecture passer pour normale.
+- **Le curseur de progression pouvait rester bloqué.** Relâcher le pointeur ailleurs que sur la
+  barre ne déclenchait pas l'événement attendu, et le temps affiché restait figé pour le reste
+  de la session.
+
+### Sécurité
+
+- **La lecture ne passe plus par le protocole `asset://` de Tauri, désormais désactivé.** Le
+  serveur local n'écoute que sur `127.0.0.1`, chaque URL porte un jeton aléatoire tiré au
+  lancement de l'app, et seuls les fichiers que l'app a explicitement autorisés sont servis :
+  tout le reste est refusé, y compris des chemins parfaitement lisibles par l'utilisateur.
+
+### Supprimé
+
+- **Le serveur HTTP local de lecture** (679 lignes écrites à la main) et toute sa surface :
+  plus de port ouvert, plus de jeton, plus d'en-têtes HTTP, plus de plages d'octets. Le
+  webview ne reçoit plus aucun média (`media-src 'none'`).
+- **La reprise automatique de lecture**, qui rechargeait la source et revenait là où le son
+  s'était arrêté. Elle contournait un défaut qui ne peut plus se produire : la fin d'une
+  piste est maintenant un index d'échantillon connu.
+- **Le bandeau de diagnostic temporaire** qui restait affiché sous le lecteur.
+- **La dépendance `tauri-plugin-opener`**, initialisée et déclarée dans les permissions sans
+  qu'aucun code ne s'en serve.
+
 ## [0.4.0] - 2026-08-24
 
 ### Corrigé
