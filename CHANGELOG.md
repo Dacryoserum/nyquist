@@ -6,6 +6,15 @@ releases start shipping.
 
 ## [Unreleased]
 
+### Modifié
+
+- CI : build, Clippy et tests partagent un profil optimisé sans symboles de debug ; tous
+  les contrôles macOS/Windows et les tests du corpus sont conservés.
+- Le packaging tourne en parallèle de la validation. Le brouillon de release n'est créé
+  qu'après succès de tous les contrôles et présence des deux installateurs.
+- Les caches partagés sont sauvegardés sur main ; les lancements manuels du packaging
+  sur une branche ne créent plus de release et peuvent préparer le cache des futurs tags.
+
 ## [0.5.0] - 2026-08-28
 
 Une version de correction. Elle ne cache plus rien : le verdict refuse de cautionner ce
