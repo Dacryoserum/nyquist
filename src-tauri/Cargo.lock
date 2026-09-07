@@ -2006,7 +2006,7 @@ dependencies = [
 
 [[package]]
 name = "nyquist"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base64 0.22.1",
  "ebur128",
@@ -2024,7 +2024,7 @@ dependencies = [
 
 [[package]]
 name = "nyquist-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "nyquist",
  "serde_json",

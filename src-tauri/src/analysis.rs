@@ -25,7 +25,7 @@ use crate::transcode_detect::{self, TranscodeAssessment};
 ///
 /// Carried in the payload so an exported JSON says which build's numbers it holds: thresholds
 /// and verdict logic move between releases, and a report read six months later is otherwise
-/// impossible to interpret. Tracks the crate version rather than a hand-maintained counter.
+/// impossible to interpret. Tracks the crate version for released analysis reports.
 pub const ANALYSIS_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Serialize)]
@@ -46,8 +46,7 @@ pub struct AnalysisResult {
     /// A separate quality issue from `transcode_assessment` — a file can be padded to a
     /// wider bit depth without ever having been lossy-compressed. See bit_depth.rs.
     pub bit_depth_analysis: BitDepthAnalysis,
-    /// The sample-rate counterpart to `bit_depth_analysis`: a file can be resampled up to
-    /// a hi-res rate it never earns, again without any lossy step. See sample_rate.rs.
+    /// Bandwidth occupancy only: native filtering cannot be distinguished from upsampling.
     pub sample_rate_analysis: SampleRateAnalysis,
     /// `None` for anything that is not exactly two channels. Reported information only —
     /// see stereo.rs on why the stereo image does *not* feed the transcode verdict.
@@ -73,13 +72,14 @@ pub struct StageTimings {
     pub total: Duration,
 }
 
+/// Decodes and analyzes the complete file without retaining its samples.
 pub fn analyze(path: &Path) -> Result<AnalysisResult, String> {
-    analyze_full(path).map(|(result, _, _)| result)
+    analyze_full(path, &|| {}).map(|(result, _, _)| result)
 }
 
 /// [`analyze`], plus how long each stage took.
 pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings), String> {
-    analyze_full(path).map(|(result, timings, _)| (result, timings))
+    analyze_full(path, &|| {}).map(|(result, timings, _)| (result, timings))
 }
 
 /// [`analyze`], plus the decoded audio itself, so the caller can play it without decoding
@@ -89,13 +89,26 @@ pub fn analyze_with_timings(path: &Path) -> Result<(AnalysisResult, StageTimings
 /// analysis already produced: same length, same sample rate, same clock. Decoding twice is
 /// how the app ended up with two disagreeing timelines in the first place — see player.rs.
 pub fn analyze_with_audio(path: &Path) -> Result<(AnalysisResult, decode::DecodedAudio), String> {
-    analyze_full(path).map(|(result, _, decoded)| (result, decoded))
+    analyze_full(path, &|| {}).map(|(result, _, decoded)| (result, decoded))
+}
+
+/// Number of completed stages emitted by [`analyze_with_progress`].
+pub const PROGRESS_STAGE_COUNT: usize = 7;
+
+/// Retains playback samples and reports each completed stage. The callback can run on
+/// concurrent Rayon workers and must not block or assume a fixed stage completion order.
+pub fn analyze_with_progress(
+    path: &Path,
+    progress: &(dyn Fn() + Sync),
+) -> Result<(AnalysisResult, decode::DecodedAudio), String> {
+    analyze_full(path, progress).map(|(result, _, decoded)| (result, decoded))
 }
 
 /// The one body every entry point above goes through, so the timed, untimed and
 /// with-audio paths can never diverge.
 fn analyze_full(
     path: &Path,
+    progress: &(dyn Fn() + Sync),
 ) -> Result<(AnalysisResult, StageTimings, decode::DecodedAudio), String> {
     let mut timings = StageTimings::default();
     let started = Instant::now();
@@ -103,6 +116,7 @@ fn analyze_full(
     let stage = Instant::now();
     let decoded = decode::decode_file(path)?;
     timings.decode = stage.elapsed();
+    progress();
 
     let file_info = metadata::build_file_info(path, &decoded)?;
 
@@ -119,11 +133,13 @@ fn analyze_full(
                 || {
                     let stage = Instant::now();
                     let out = signal_analysis::analyze_signal(&decoded);
+                    progress();
                     (out, stage.elapsed())
                 },
                 || {
                     let stage = Instant::now();
                     let out = dynamic_range::compute_dr14(&decoded);
+                    progress();
                     (out, stage.elapsed())
                 },
             )
@@ -133,6 +149,7 @@ fn analyze_full(
                 || {
                     let stage = Instant::now();
                     let out = spectral::analyze_spectrum(&decoded);
+                    progress();
                     (out, stage.elapsed())
                 },
                 || {
@@ -140,6 +157,7 @@ fn analyze_full(
                         || {
                             let stage = Instant::now();
                             let out = bit_depth::analyze_bit_depth(&decoded);
+                            progress();
                             (out, stage.elapsed())
                         },
                         || {
@@ -147,11 +165,13 @@ fn analyze_full(
                                 || {
                                     let stage = Instant::now();
                                     let out = stereo::analyze_stereo(&decoded);
+                                    progress();
                                     (out, stage.elapsed())
                                 },
                                 || {
                                     let stage = Instant::now();
                                     let out = mdct_grid::analyze_mdct_grid(&decoded);
+                                    progress();
                                     (out, stage.elapsed())
                                 },
                             )
@@ -179,7 +199,7 @@ fn analyze_full(
 
     let signal_analysis = signal_analysis?;
     let spectral_analysis = spectral_analysis?;
-    let transcode_assessment = transcode_detect::assess_transcode_risk(
+    let mut transcode_assessment = transcode_detect::assess_transcode_risk(
         &spectral_analysis,
         file_info.nyquist_hz as f64,
         &decoded.encoder_tag_matches,
@@ -187,6 +207,9 @@ fn analyze_full(
         &decoded.codec_short_name,
         &decoded.decode_status,
     );
+    if decoded.integrity_verified == Some(false) {
+        transcode_assessment.withhold_on_integrity_failure();
+    }
     let sample_rate_analysis = sample_rate::analyze_sample_rate(
         file_info.sample_rate_hz,
         spectral_analysis.spectral_cutoff_hz,

@@ -2,6 +2,7 @@
   import { onMount } from "svelte";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
+  import { listen } from "@tauri-apps/api/event";
   import {
     analyzeFile,
     exportReport,
@@ -12,6 +13,7 @@
     playerSetVolume,
     playerState,
     type AnalysisResult,
+    type AnalysisProgress,
     type PlaybackState,
     type Verdict
   } from "$lib/api";
@@ -29,6 +31,8 @@ import Meter from "$lib/components/Meter.svelte";
   let result = $state<AnalysisResult | null>(null);
   let error = $state<string | null>(null);
   let loading = $state(false);
+  let analysisRequestId: string | null = null;
+  let progress = $state<AnalysisProgress | null>(null);
   let lastPath = $state<string | null>(null);
   let dragging = $state(false);
   let theme = $state<"light" | "dark">("dark");
@@ -68,6 +72,17 @@ import Meter from "$lib/components/Meter.svelte";
   });
 
   onMount(() => {
+    let disposed = false;
+    let unlistenProgress: (() => void) | undefined;
+    listen<AnalysisProgress>("analysis-progress", ({ payload }) => {
+      if (payload.request_id === analysisRequestId &&
+          (!progress || payload.completed_stages >= progress.completed_stages)) {
+        progress = payload;
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlistenProgress = fn;
+    }).catch(() => {});
     let saved: string | null = null;
     try {
       saved = localStorage.getItem("nyquist-theme");
@@ -110,6 +125,8 @@ import Meter from "$lib/components/Meter.svelte";
       /* Not running inside Tauri. */
     }
     return () => {
+      disposed = true;
+      unlistenProgress?.();
       unlisten?.();
       stopPolling();
     };
@@ -185,6 +202,9 @@ import Meter from "$lib/components/Meter.svelte";
 
   async function analyze(path: string) {
     const mine = ++generation;
+    const requestId = crypto.randomUUID();
+    analysisRequestId = requestId;
+    progress = null;
     teardownPlayback();
     loading = true;
     error = null;
@@ -192,12 +212,13 @@ import Meter from "$lib/components/Meter.svelte";
     result = null;
     lastPath = path;
     compareResult = null;
+    compareLoading = false;
 
     // One call now: the backend loads the decoded samples into the player as part of
     // analysing them, so playback cannot end up describing a different file — or a different
     // length of the same file — from the report beside it.
     try {
-      const analysis = await analyzeFile(path);
+      const analysis = await analyzeFile(path, requestId, true);
       if (mine !== generation) return;
       result = analysis;
     } catch (e) {
@@ -223,7 +244,7 @@ import Meter from "$lib/components/Meter.svelte";
     } catch (e) {
       if (mine === generation) playbackError = describeError(e);
     }
-    loading = false;
+    if (mine === generation) loading = false;
   }
 
   /** Turns a backend error into something a French UI can show.
@@ -258,7 +279,7 @@ import Meter from "$lib/components/Meter.svelte";
     compareLoading = true;
     compareError = null;
     try {
-      const analysis = await analyzeFile(path);
+      const analysis = await analyzeFile(path, crypto.randomUUID(), false);
       if (mine === generation) compareResult = analysis;
     } catch (e) {
       if (mine === generation) compareError = describeError(e);
@@ -474,17 +495,14 @@ import Meter from "$lib/components/Meter.svelte";
         detail: T.findings.bitDepthPaddingDetail(bd.effective_bit_depth, fmt(bd.active_sample_ratio * 100, 1))
       });
     }
-    // `likely_upsampled` is only ever set on a bandwidth that was actually measured, so the
+    // `bandwidth_limited` is only ever set on a bandwidth that was actually measured, so the
     // two non-null reads below are guaranteed — asserted rather than assumed all the same.
-    if (sr.likely_upsampled && sr.content_bandwidth_hz !== null && sr.bandwidth_ratio !== null) {
+    if (sr.bandwidth_limited && sr.content_bandwidth_hz !== null && sr.bandwidth_ratio !== null) {
       f.push({
         icon: "ruler",
         tone: "warn",
-        title: T.findings.upsampledTitle(fmt(sr.declared_sample_rate_hz / 1000, 1), fmt(sr.content_bandwidth_hz / 1000, 1)),
-        detail: T.findings.upsampledDetail(
-          fmt(sr.bandwidth_ratio * 100, 0),
-          sr.sufficient_sample_rate_hz ? fmt(sr.sufficient_sample_rate_hz / 1000, 1) : null
-        )
+        title: T.findings.limitedBandwidthTitle(fmt(sr.declared_sample_rate_hz / 1000, 1), fmt(sr.content_bandwidth_hz / 1000, 1)),
+        detail: T.findings.limitedBandwidthDetail(fmt(sr.bandwidth_ratio * 100, 0))
       });
     }
     // Runs of full-scale samples, not the raw count: one sample touching the rail is a loud
@@ -565,7 +583,7 @@ import Meter from "$lib/components/Meter.svelte";
       <section class="loading" aria-live="polite">
         <ThinkingOrb state="composing" size={64} dark={theme === "dark"} />
         <p>{T.loading.text}</p>
-        <span class="hint">{T.loading.hint}</span>
+        <span class="hint" role="status">{progress ? T.loading.progress(progress.completed_stages, progress.total_stages) : T.loading.hint}</span>
       </section>
     {/if}
 
@@ -663,7 +681,7 @@ import Meter from "$lib/components/Meter.svelte";
         <div class="bandwidth">
           <div class="bandwidth-head">
             <span class="label">{T.file.bandwidthUsed}</span>
-            <span class="value" class:value-warn={sr.likely_upsampled}>
+            <span class="value" class:value-warn={sr.bandwidth_limited}>
               {#if sr.content_bandwidth_hz !== null && sr.bandwidth_ratio !== null}
                 {T.file.bandwidthPhrase(fmtHz(sr.content_bandwidth_hz), fmtHz(fi.nyquist_hz))}
                 <em>({fmt(sr.bandwidth_ratio * 100, 0)}%)</em>
@@ -682,7 +700,7 @@ import Meter from "$lib/components/Meter.svelte";
               max={1}
               label={T.file.bandwidthUsed}
               valueText="{fmt(sr.bandwidth_ratio * 100, 0)}%"
-              tone={sr.likely_upsampled ? "warn" : "good"}
+              tone={sr.bandwidth_limited ? "warn" : "good"}
             />
           {/if}
         </div>
@@ -724,6 +742,9 @@ import Meter from "$lib/components/Meter.svelte";
       <div class="metric-columns">
         <section class="card">
           <h2 class="section-title">{T.loudness.title}</h2>
+          {#if !sa.loudness_layout_supported}
+            <p class="scale-note">{T.loudness.unknownLayoutNote}</p>
+          {/if}
 
           <div class="metric">
             <div class="metric-head">

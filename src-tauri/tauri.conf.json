@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Nyquist",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "identifier": "com.nyquist.analyzer",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -32,7 +32,7 @@
     "targets": "all",
     "category": "Music",
     "shortDescription": "Audio quality analyzer and transcode detector",
-    "longDescription": "Nyquist inspects an audio file and reports whether it is what its container claims: it measures loudness (LUFS, true peak, LRA), dynamic range (DR), spectral content, and looks for the fingerprints of a lossy encoder hidden inside a lossless file, of a bit depth padded wider than the audio behind it, and of a sample rate upsampled past the bandwidth actually present.",
+    "longDescription": "Nyquist measures loudness (LUFS, true peak, LRA), dynamic range (DR), spectral content and bit-depth padding. It searches for confirmed AAC encoder fingerprints in lossless files and explains inconclusive results. Limited bandwidth is reported without claiming an original sample rate or guaranteeing a lossless source.",
     "copyright": "Nyquist contributors, MIT licensed",
     "icon": [
       "icons/32x32.png",

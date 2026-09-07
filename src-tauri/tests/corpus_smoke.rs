@@ -38,12 +38,9 @@ struct Fixture {
     expected_duration_seconds: f64,
     /// Ground truth per corpus/README.md — is this file actually a lossy transcode?
     is_actually_transcoded: bool,
-    /// True for the two fixtures documented in corpus/README.md as undetectable by
-    /// spectral-cutoff methods (LAME V0, AAC 256 — neither lowpasses). A wrong verdict on
-    /// these is an expected, already-understood limitation, not a regression — see
-    /// transcode_detect.rs module docs "Known blind spot". Still counted in the report,
-    /// just not asserted as a hard failure.
-    known_undetectable: bool,
+    /// Explicit abstention on MP3: a spectral edge is ambiguous, and this detector only
+    /// confirms AAC grids. Still counted as a missed transcode, never hidden as a success.
+    expected_abstention: bool,
 }
 
 const FIXTURES: &[Fixture] = &[
@@ -57,7 +54,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         filename: "authentic_96k_noise.flac",
@@ -66,7 +63,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         // Not a tight bound on purpose: the point of this fixture is that a naturally
@@ -78,18 +75,18 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         filename: "transcoded_mp3_320_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
         // LAME 320's wall is narrow enough that the wide bandwidth probe steps over it;
-        // it is caught by steepness, which is what the verdict assertion below covers.
+        // steepness reports it, but cannot distinguish it from a mastering filter.
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
-        known_undetectable: false,
+        expected_abstention: true,
     },
     Fixture {
         filename: "transcoded_mp3_128_44k.flac",
@@ -98,7 +95,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: Some((16_500.0, 17_500.0)),
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
-        known_undetectable: false,
+        expected_abstention: true,
     },
     Fixture {
         // LAME V0 doesn't lowpass — indistinguishable from authentic by cutoff frequency
@@ -110,7 +107,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
-        known_undetectable: true,
+        expected_abstention: true,
     },
     Fixture {
         filename: "transcoded_aac_256_44k.flac",
@@ -119,7 +116,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         // False-positive trap: genuinely lossless *tonal* content. A sustained chord's
@@ -134,19 +131,19 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         // Music-shaped rather than flat: the case that exposed a peak-relative bandwidth
         // measurement as unusable. Genuinely lossless and full-bandwidth, so it must read
-        // authentic — it used to come out "indeterminate" at 30%, as every real FLAC did.
+        // inconclusive without inventing evidence from the shape of its spectrum.
         filename: "authentic_musiclike_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: false,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         // Same, at a genuine hi-res rate: additionally guards against the sample-rate check
@@ -157,7 +154,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: false,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         // False-negative trap: the same LAME 128 transcode as above, padded with digital
@@ -171,7 +168,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: Some((16_500.0, 17_500.0)),
         expected_duration_seconds: 11.0,
         is_actually_transcoded: true,
-        known_undetectable: false,
+        expected_abstention: true,
     },
     Fixture {
         // Lossless throughout, so NOT a transcode — the deception here is the sample rate,
@@ -184,7 +181,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: Some((24_000.0, 26_000.0)),
         expected_duration_seconds: 5.0,
         is_actually_transcoded: false,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         // Both defects at once: lossy source, then upsampled so the encoder cutoff no
@@ -195,7 +192,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: Some((16_500.0, 17_500.0)),
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
-        known_undetectable: false,
+        expected_abstention: true,
     },
     // ── Non-stationary, true-stereo material ────────────────────────────────────────
     // Everything above is stationary noise in dual-mono. These five share one source with
@@ -211,7 +208,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: false,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         // Still caught, and the control that proves the new material did not simply break
@@ -222,7 +219,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: Some((16_400.0, 17_400.0)),
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
-        known_undetectable: false,
+        expected_abstention: true,
     },
     Fixture {
         // The documented blind spot, reproduced on realistic material: no lowpass at all,
@@ -234,7 +231,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
-        known_undetectable: true,
+        expected_abstention: true,
     },
     Fixture {
         // Same, for Apple's AAC at 256 kbps.
@@ -244,7 +241,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         // New information from this material: AAC 128 lowpasses at 18.3 kHz but only at
@@ -258,7 +255,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: Some((18_000.0, 19_000.0)),
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     // ── False-positive traps on non-stationary material ─────────────────────────────
     Fixture {
@@ -272,7 +269,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: Some((10_700.0, 11_700.0)),
         expected_duration_seconds: 10.0,
         is_actually_transcoded: false,
-        known_undetectable: false,
+        expected_abstention: false,
     },
     Fixture {
         // Loud, and empty above the bass. Guards any rule of the form "high band is silent
@@ -283,7 +280,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: false,
-        known_undetectable: false,
+        expected_abstention: false,
     },
 ];
 
@@ -296,6 +293,7 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
     let mut false_positives: Vec<&str> = Vec::new();
     let mut false_negatives: Vec<&str> = Vec::new();
     let mut known_misses: Vec<&str> = Vec::new();
+    let mut detections = 0;
     let mut vouched_for_fakes: Vec<&str> = Vec::new();
 
     for fx in FIXTURES {
@@ -418,10 +416,21 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
             fx.filename
         );
 
+        let expected_verdict = if fx.is_actually_transcoded && !fx.expected_abstention {
+            Verdict::ProbablyTranscoded
+        } else {
+            Verdict::Indeterminate
+        };
+        assert_eq!(
+            assessment.verdict, expected_verdict,
+            "{}: evidence policy changed",
+            fx.filename
+        );
         let flagged_transcoded = matches!(assessment.verdict, Verdict::ProbablyTranscoded);
+        detections += usize::from(fx.is_actually_transcoded && flagged_transcoded);
         match (fx.is_actually_transcoded, flagged_transcoded) {
             (false, true) => false_positives.push(fx.filename),
-            (true, false) if fx.known_undetectable => known_misses.push(fx.filename),
+            (true, false) if fx.expected_abstention => known_misses.push(fx.filename),
             (true, false) => false_negatives.push(fx.filename),
             _ => {}
         }
@@ -434,7 +443,7 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
 
     eprintln!(
         "\n=== transcode_detect corpus report: {} fixtures, {} false positives, {} \
-         unexpected false negatives, {} known/documented misses ===",
+         unexpected false negatives, {} expected abstentions ===",
         FIXTURES.len(),
         false_positives.len(),
         false_negatives.len(),
@@ -458,22 +467,20 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
         false_positives.is_empty(),
         "false positives on authentic fixtures: {false_positives:?}"
     );
-    // A false negative on a case NOT already documented as undetectable would mean the
-    // heuristic regressed on a case it used to catch (e.g. mp3_128/mp3_320). The two
-    // known/documented misses (V0, AAC256) are asserted separately below so a fix to that
-    // blind spot is visible instead of silently swallowed by a loose assertion.
+    // Regression detection remains strict: the three AAC fixtures must still be caught.
+    // Seven MP3 abstentions are counted explicitly after withdrawing spectral-only claims.
     assert!(
         false_negatives.is_empty(),
         "unexpected false negatives: {false_negatives:?}"
     );
     assert_eq!(
         known_misses.len(),
-        2,
-        "expected exactly the 2 remaining undetectable cases to miss — LAME V0 on both the \
-         stationary and the non-stationary material. Every AAC case is now caught by the MDCT \
-         grid sweep (mdct_grid.rs), which cannot invert MP3's hybrid filterbank. Got \
-         {known_misses:?} — if this shrinks further the MP3 side has been solved: update \
-         `known_undetectable` and this assertion; if it grows, something regressed"
+        7,
+        "all seven MP3 fixtures currently require abstention: {known_misses:?}"
+    );
+    assert_eq!(
+        detections, 3,
+        "the three AAC fixtures must retain confirmed grid evidence"
     );
 }
 
@@ -568,12 +575,9 @@ fn a_pure_sine_is_never_reported_as_transcoded() {
     );
 }
 
-/// `sample_rate::analyze_sample_rate` — the sample-rate counterpart to the bit-depth
-/// padding check below. Genuine hi-res must stay silent; a file resampled up from CD rate
-/// must be caught even though it is lossless end to end and therefore invisible to the
-/// transcode verdict.
+/// Bandwidth occupancy is measured without claiming a file's original sample rate.
 #[test]
-fn upsampled_hi_res_is_detected_without_false_positives() {
+fn limited_bandwidth_is_reported_without_claiming_upsampling() {
     let cases: &[(&str, bool)] = &[
         ("upsampled_44k_to_96k.flac", true),
         ("transcoded_mp3_128_upsampled_96k.flac", true),
@@ -585,7 +589,7 @@ fn upsampled_hi_res_is_detected_without_false_positives() {
         ("authentic_44k_lowpass_naturally.flac", false),
     ];
 
-    for (filename, expected_upsampled) in cases {
+    for (filename, expected_limited) in cases {
         let path = corpus_dir().join(filename);
         let decoded =
             decode_file(&path).unwrap_or_else(|e| panic!("{filename}: decode failed: {e}"));
@@ -594,25 +598,15 @@ fn upsampled_hi_res_is_detected_without_false_positives() {
         let analysis = analyze_sample_rate(decoded.sample_rate, spectral.spectral_cutoff_hz);
 
         assert_eq!(
-            analysis.likely_upsampled,
-            *expected_upsampled,
-            "{filename}: expected likely_upsampled={expected_upsampled}, got {} \
+            analysis.bandwidth_limited,
+            *expected_limited,
+            "{filename}: expected bandwidth_limited={expected_limited}, got {} \
              (declared {} Hz, bandwidth {:?} Hz, ratio {:?})",
-            analysis.likely_upsampled,
+            analysis.bandwidth_limited,
             analysis.declared_sample_rate_hz,
             analysis.content_bandwidth_hz,
             analysis.bandwidth_ratio
         );
-
-        if *expected_upsampled {
-            let sufficient = analysis.sufficient_sample_rate_hz.unwrap_or_else(|| {
-                panic!("{filename}: flagged as upsampled but named no sufficient rate")
-            });
-            assert!(
-                sufficient < analysis.declared_sample_rate_hz,
-                "{filename}: sufficient rate {sufficient} must be below the declared rate"
-            );
-        }
     }
 }
 

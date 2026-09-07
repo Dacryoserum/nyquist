@@ -138,6 +138,9 @@ pub struct SpectrogramData {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SpectralAnalysis {
+    /// Whether any spectral content rose above the numerical measurement floor. False means
+    /// silence or insufficient signal, never evidence that a file has full bandwidth.
+    pub has_signal: bool,
     /// Highest frequency still carrying meaningful energy, when the wide-probe sweep found
     /// a point where the content actually stops. A raw indicator only — see module docs.
     ///
@@ -155,10 +158,8 @@ pub struct SpectralAnalysis {
     /// measured on a real orchestral track) without being a transcode. A raw indicator
     /// only — see module docs.
     pub rolloff_steepness_db_per_khz: f64,
-    /// Where the narrow-probe scan found a codec-like edge, if it found one. `None` means
-    /// no lowpass is present anywhere above 8 kHz, which is the positive evidence behind a
-    /// "probably authentic" verdict. Distinct from `spectral_cutoff_hz`, which is measured
-    /// at a wider scale and answers "where does content end" rather than "is there a wall".
+    /// Position of a sharp, sustained spectral edge. Native filters and codec lowpasses
+    /// are ambiguous; neither its presence nor absence establishes provenance.
     pub encoder_edge_hz: Option<f64>,
     /// `spectral_cutoff_hz` computed independently within each of the spectrogram's time
     /// bins (same `global_peak_db` reference throughout, so values are directly
@@ -178,28 +179,17 @@ pub struct SpectralAnalysis {
     /// transcodes wander by 33-252 Hz. Wiring this into the verdict in either direction
     /// would make things worse, not better.
     pub cutoff_stability_hz: f64,
-    /// Steady-state level of a handful of named bands, in dB relative to the loudest of
-    /// them. Lets a reader see the spectral shape the verdict was derived from — a dark
-    /// master and an encoder lowpass produce very different tables here — instead of taking
-    /// a single cutoff number on trust.
+    /// Steady-state level of named bands relative to the loudest. Describes the spectral
+    /// shape without attributing a filtering operation to a particular cause.
     pub band_levels_db: Vec<BandLevel>,
     /// How far the region above `encoder_edge_hz` sits below the region below it, in dB.
     /// `None` when no edge was found. This is the "sustained drop" that
     /// [`find_spectral_edge`]'s second gate tests, surfaced so the gate's own evidence is
     /// visible rather than implicit in a pass/fail.
     pub stopband_depth_db: Option<f64>,
-    /// Level of the top of the declared band — everything from `0.75 x Nyquist` (never below
-    /// the 22.05 kHz CD ceiling) up to Nyquist — relative to the 1 kHz-22.05 kHz reference
-    /// band, in dB. `None` when the declared Nyquist does not clear the ceiling, i.e. for
-    /// every 44.1/48 kHz file, where the question does not arise.
-    ///
-    /// The one piece of *positive* evidence of authenticity this project has: no MP3 or
-    /// CD-sourced lossy encode exists at a sample rate high enough to put real content up
-    /// there, so content that is up there did not come through one. Measured directly rather
-    /// than inferred from a cutoff position — the previous version read it off
-    /// `spectral_cutoff_hz`, which meant a full-bandwidth 96 kHz file, whose content is
-    /// bounded by nothing and therefore has no cutoff to read, could not produce the evidence
-    /// its own spectrum plainly contained.
+    /// Power in the top quarter of the declared band (never below 22.05 kHz), relative to
+    /// 1–22.05 kHz. `None` at 44.1/48 kHz or without measurable signal. Added noise can
+    /// create ultrasonic content after transcoding; this observation never proves origin.
     pub above_cd_ceiling_db: Option<f64>,
     pub spectrogram: SpectrogramData,
 }
@@ -255,9 +245,10 @@ pub fn analyze_spectrum(decoded: &DecodedAudio) -> Result<SpectralAnalysis, Stri
     // every frame). Frames are independent, so they also fill in parallel; the FFT plan is
     // shared and each worker keeps its own scratch buffer.
     let mut frames_db = vec![0.0f32; frame_count * raw_bin_count];
-    let inv_channels = 1.0 / decoded.channels as f32;
     let channels = &decoded.channel_samples;
     let mut scratch = vec![Complex32::new(0.0, 0.0); FFT_SIZE];
+    let mut fft_scratch = vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
+    let mut channel_power = vec![0.0f64; raw_bin_count];
 
     // Left sequential on purpose, having measured the alternative. Filling these frames in
     // parallel does cut this stage's own latency (~850ms to ~620ms), but the stage is not on
@@ -269,45 +260,31 @@ pub fn analyze_spectrum(decoded: &DecodedAudio) -> Result<SpectralAnalysis, Stri
     for frame_idx in 0..frame_count {
         let start = frame_idx * HOP_SIZE;
 
-        // Downmixed one frame at a time rather than materializing a whole-track mono copy,
-        // which was another full-length f32 buffer (184 MB on an 8-minute 96 kHz file).
-        // Specialized per channel count so the common cases stay a straight vectorizable
-        // pass: a generic loop over a `Vec<Vec<f32>>` per sample cost more CPU than the
-        // buffer it saved. Summing in channel order keeps results identical either way.
-        match channels.len() {
-            1 => {
-                let ch = &channels[0][start..start + FFT_SIZE];
-                for (slot, (&s, &w)) in scratch.iter_mut().zip(ch.iter().zip(window.iter())) {
-                    *slot = Complex32::new(s * w, 0.0);
-                }
+        // Average channel powers after the transform. A waveform downmix cancels L=-R,
+        // hiding real audio and its codec fingerprints. Inverting any channel now leaves
+        // the measurement invariant. This is an unweighted spectrum, not a BS.1770 downmix.
+        channel_power.fill(0.0);
+        for channel in channels {
+            for (slot, (&sample, &weight)) in scratch
+                .iter_mut()
+                .zip(channel[start..start + FFT_SIZE].iter().zip(&window))
+            {
+                *slot = Complex32::new(sample * weight, 0.0);
             }
-            2 => {
-                let left = &channels[0][start..start + FFT_SIZE];
-                let right = &channels[1][start..start + FFT_SIZE];
-                for (i, slot) in scratch.iter_mut().enumerate() {
-                    *slot = Complex32::new((left[i] + right[i]) * inv_channels * window[i], 0.0);
-                }
-            }
-            _ => {
-                for (i, slot) in scratch.iter_mut().enumerate() {
-                    let mut sum = 0.0f32;
-                    for channel in channels {
-                        sum += channel[start + i];
-                    }
-                    *slot = Complex32::new(sum * inv_channels * window[i], 0.0);
-                }
+            fft.process_with_scratch(&mut scratch, &mut fft_scratch);
+            for (power, bin) in channel_power.iter_mut().zip(&scratch) {
+                *power += (bin.re as f64).powi(2) + (bin.im as f64).powi(2);
             }
         }
-
-        fft.process(&mut scratch);
-
         let out = &mut frames_db[frame_idx * raw_bin_count..(frame_idx + 1) * raw_bin_count];
-        for (bin, slot) in scratch.iter().take(raw_bin_count).zip(out.iter_mut()) {
-            *slot = linear_to_db(bin.norm() / (FFT_SIZE as f32 / 2.0));
+        for (&power, slot) in channel_power.iter().zip(out.iter_mut()) {
+            let amplitude = (power / channels.len() as f64).sqrt() / (FFT_SIZE as f64 / 2.0);
+            *slot = linear_to_db(amplitude as f32);
         }
     }
 
     let global_peak_db = frames_db.iter().copied().fold(f32::MIN, f32::max);
+    let has_signal = global_peak_db > ANALYSIS_FLOOR_DB;
     let mean_db = mean_spectrum(&frames_db, raw_bin_count);
 
     // Two scans at two scales, because "is there a codec brick wall" and "where does the
@@ -374,7 +351,7 @@ pub fn analyze_spectrum(decoded: &DecodedAudio) -> Result<SpectralAnalysis, Stri
     // Reference band deliberately starts at 1 kHz rather than 0: the low end of music carries
     // most of its energy, and measuring the top against that would report every ordinary
     // file as empty up there.
-    let above_cd_ceiling_db = (nyquist_hz > CD_CEILING_HZ + MIN_STOPBAND_WIDTH_HZ).then(|| {
+    let above_cd_ceiling_db = (has_signal && decoded.sample_rate > 48_000).then(|| {
         let hi_lo = (nyquist_hz * HI_BAND_FRACTION).max(CD_CEILING_HZ);
         let hi = band_level_db(&mean_db, hi_lo, nyquist_hz, raw_bin_count, nyquist_hz);
         let reference = band_level_db(
@@ -388,6 +365,7 @@ pub fn analyze_spectrum(decoded: &DecodedAudio) -> Result<SpectralAnalysis, Stri
     });
 
     Ok(SpectralAnalysis {
+        has_signal,
         spectral_cutoff_hz,
         rolloff_steepness_db_per_khz,
         encoder_edge_hz,

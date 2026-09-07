@@ -135,13 +135,9 @@
       },
       {
         label: T.mdct.title,
-        a: a.mdct_grid.analyzed ? `${fmt(a.mdct_grid.z_score, 1)} σ` : na(),
-        b: b.mdct_grid.analyzed ? `${fmt(b.mdct_grid.z_score, 1)} σ` : na(),
-        // Lower is better here: a high score is an encoder grid.
-        better:
-          a.mdct_grid.analyzed && b.mdct_grid.analyzed
-            ? lead(a.mdct_grid.z_score, b.mdct_grid.z_score, 10, false)
-            : null
+        a: a.mdct_grid.analyzed ? (a.mdct_grid.grid_detected ? T.mdct.detected : T.mdct.clear) : na(),
+        b: b.mdct_grid.analyzed ? (b.mdct_grid.grid_detected ? T.mdct.detected : T.mdct.clear) : na()
+        // A negative grid search is not proof of higher quality or a lossless history.
       }
     ];
 

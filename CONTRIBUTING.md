@@ -28,9 +28,10 @@ workflow below is fixed from day one.
 Backend (`src-tauri/`):
 
 ```bash
-cargo build
-cargo test
-cargo clippy -- -D warnings
+cargo fmt --all -- --check
+cargo build --locked --workspace
+cargo test --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
 ```
 
 Frontend:
@@ -57,7 +58,7 @@ false-positive/negative impact in the PR).
 
 ## Changelog
 
-User-facing changes get an entry in `CHANGELOG.md` under `[Unreleased]`, written for a
+User-facing changes get an entry in `CHANGELOG.md` under `[Non publié]`, written for a
 human, not a diff summary.
 
 ## License

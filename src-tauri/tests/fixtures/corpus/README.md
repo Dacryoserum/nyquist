@@ -1,3 +1,13 @@
+## Current verdict policy
+
+The measurements and historical experiments below describe the original corpus. The current
+evidence revision deliberately abstains on all seven MP3 derivatives: five former detections
+relied solely on spectral edges that legitimate filters can reproduce. All three AAC fixtures
+remain detected. On these 20 files: 3/10 detected lossy derivatives, 7/10 abstentions, 0/10
+lossless files accused, and no lossy file called authentic. These are development regressions,
+not a held-out accuracy estimate. See [forensic counterexamples](forensic/README.md) and
+[research and limitations](../../../../docs/detection-research.md).
+
 # Test corpus
 
 Synthetic audio fixtures with **known ground truth**, generated locally by

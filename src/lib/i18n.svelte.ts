@@ -75,7 +75,7 @@ interface Dict {
   /** Names shown in the OS file picker / save dialog, which is chrome we still own. */
   dialogs: { audioFiles: string; jsonFiles: string };
   dropzone: { title: string; subtitle: string; chooseFile: string };
-  loading: { text: string; hint: string };
+  loading: { text: string; hint: string; progress: (completed: number, total: number) => string };
   dragOverlay: string;
   verdict: {
     probablyAuthentic: { label: string; blurb: string };
@@ -101,8 +101,8 @@ interface Dict {
     incompleteDecodeDetail: string;
     bitDepthPaddingTitle: (declared: number, effective: number) => string;
     bitDepthPaddingDetail: (effective: number, activePct: string) => string;
-    upsampledTitle: (declaredKHz: string, usedKHz: string) => string;
-    upsampledDetail: (pct: string, sufficientKHz: string | null) => string;
+    limitedBandwidthTitle: (declaredKHz: string, usedKHz: string) => string;
+    limitedBandwidthDetail: (pct: string) => string;
     clippedRunsTitle: (runs: string, samples: string) => string;
     clippedRunsDetail: string;
   };
@@ -136,6 +136,7 @@ interface Dict {
     integratedLoudness: string;
     na: string;
     lufsTargetNote: string;
+    unknownLayoutNote: string;
     truePeak: string;
     clipWarnNote: string;
     headroomNote: string;
@@ -243,6 +244,9 @@ interface Dict {
     zeroed: string;
     baseline: string;
     strength: string;
+    confirmation: string;
+    window: string;
+    sineWindow: string;
     axisOffset: string;
     chartAria: string;
     note: string;
@@ -264,6 +268,7 @@ const fr: Dict = {
     chooseFile: "Choisir un fichier"
   },
   loading: {
+    progress: (completed, total) => `${completed}/${total} étapes terminées — les durées varient selon l'étape`,
     text: "Décodage et analyse en cours…",
     hint: "Passes FFT et de sonie sur l'intégralité de chaque échantillon."
   },
@@ -279,7 +284,7 @@ const fr: Dict = {
     },
     indeterminate: {
       label: "Indéterminé",
-      blurb: "Aucun indice de transcodage n'a été trouvé — ce qui n'est pas une preuve d'authenticité. C'est une réponse à part entière, pas un échec."
+      blurb: "Les indices disponibles ne permettent pas d'établir la provenance. Ce n'est ni une garantie d'authenticité, ni une accusation."
     },
     declaredLossy: {
       label: (codec) => `Format avec perte (${codecName(codec)})`,
@@ -299,40 +304,44 @@ const fr: Dict = {
             : ""
         }. Les tags stockés en fin de fichier (ID3v1, APEv2) ne sont pas lus : leur absence ne prouve donc rien dans un sens ni dans l'autre.`;
       case "tag_is_only_evidence":
-        return "Le spectre seul n'a rien permis de conclure : ce verdict repose donc sur le tag — qui peut être obsolète, recopié depuis un fichier source, ou tout simplement faux.";
-      case "tag_contradicts_spectrum":
-        return "Ceci contredit la mesure spectrale ci-dessus, qui n'a trouvé aucune coupure d'encodeur. Soit le tag est un reliquat d'une étape antérieure de l'histoire du fichier et l'audio est réellement sans perte, soit il s'agissait d'un encodage avec perte transparent que cette méthode ne peut pas voir. Rapporté comme indéterminé plutôt que de laisser l'un des deux signaux l'emporter sur l'autre.";
+        return "Un tag peut être recopié, obsolète ou faux. Sans confirmation structurelle, il ne suffit pas à conclure à un transcodage.";
+      case "insufficient_signal":
+        return "Le signal est silencieux ou trop faible pour fournir des indices spectraux fiables. Aucun verdict d'authenticité ne peut en être tiré.";
+      case "integrity_mismatch":
+        return "La somme de contrôle ne correspond pas à l'audio décodé. Le verdict de provenance est suspendu ; vérifiez ou ré-extrayez le fichier.";
       case "invalid_sample_rate":
         return "Fréquence d'échantillonnage invalide ; impossible d'évaluer le contenu spectral.";
       case "sharp_rolloff":
-        return `Coupure spectrale franche (~${fmtNumber(i.steepness_db_per_khz, 0)} dB/kHz) autour de ${fmtNumber(i.edge_khz, 1)} kHz — assez raide pour correspondre au filtre passe-bas d'un encodeur avec perte plutôt qu'à un contenu de mixage ou de mastering naturel (la pente naturelle mesurée reste bien en dessous de 20 dB/kHz sur tout le corpus de test du projet, réel comme synthétique).`;
+        return `Coupure franche (~${fmtNumber(i.steepness_db_per_khz, 0)} dB/kHz) autour de ${fmtNumber(i.edge_khz, 1)} kHz. Un encodeur, un filtre de mastering ou un ré-échantillonnage peuvent tous la produire : ce n'est pas une preuve de compression avec perte.`;
       case "no_encoder_lowpass":
-        return `Aucun passe-bas d'encodeur trouvé : le spectre a été balayé depuis ${fmtNumber(i.scanned_from_khz, 0)} kHz jusqu'à la fréquence de Nyquist de ${fmtNumber(i.nyquist_khz, 1)} kHz, et aucun point n'a montré la chute nette vers une bande vide durable que laisse un codec avec perte.`;
+        return `Aucune coupure franche et soutenue mesurée entre ${fmtNumber(i.scanned_from_khz, 0)} et ${fmtNumber(i.nyquist_khz, 1)} kHz. L'absence de coupure ne prouve pas l'absence de compression avec perte.`;
       case "transparent_encode_unseen":
-        return "Ce n'est pas une preuve d'authenticité. Un encodage avec perte transparent (par ex. LAME V0) ne filtre pas du tout, et le corpus du projet montre que ceux-ci se mesurent de façon indiscernable du sans perte par cette méthode : une coupure absente est donc tout aussi compatible avec un transcodage MP3 soigné. Aucun indice de transcodage n'a été détecté — ce qui n'est pas la même affirmation que « le fichier est sans perte ».";
+        return "Une compression avec perte peut ne laisser aucun indice détectable par ces tests, notamment après traitement du signal. L'absence de grille confirmée ne garantit pas une source sans perte.";
       case "gradual_rolloff":
         return `Le contenu s'arrête autour de ${fmtNumber(i.cutoff_khz, 1)} kHz, mais la transition y est progressive (~${fmtNumber(i.steepness_db_per_khz, 0)} dB/kHz) plutôt que le mur quasi vertical que produit un codec. C'est compatible avec un master volontairement sombre, un report de vinyle ou de bande, ou un encodage avec perte dont cette méthode ne peut pas distinguer le filtre — pas de quoi trancher dans un sens ou dans l'autre.`;
       case "mdct_grid_aligned":
-        return `Les coefficients MDCT du fichier s'effondrent à un alignement de trame précis (décalage ${i.frame_offset}, ${fmtNumber(i.z_score, 0)} écarts-types au-dessus de ce que fait ce même fichier à tous les autres décalages) : ${fmtNumber(i.zero_percent, 1)} % des coefficients y sont annulés, contre ${fmtNumber(i.baseline_percent, 1)} % ailleurs. C'est la signature d'une grille de quantification d'encodeur AAC. De l'audio sans perte n'a aucune raison de présenter un tel alignement. La méthode suppose un AAC à blocs longs et n'examine qu'un seul canal — voir mdct_grid.rs pour son périmètre exact.`;
+        return `Alignement MDCT compatible avec des blocs longs AAC (fenêtre ${i.window === "kaiser_bessel" ? "Kaiser–Bessel" : "sinus"}, décalage ${i.frame_offset}). Écart robuste : ${fmtNumber(i.z_score, 0)} au balayage, ${fmtNumber(i.confirmed_z_score, 0)} sur des trames distinctes de confirmation ; ${fmtNumber(i.zero_percent, 1)} % de coefficients quasi nuls contre ${fmtNumber(i.baseline_percent, 1)} % aux décalages témoins. Indice structurel fort, pas une preuve absolue ni une probabilité calibrée.`;
       case "mdct_grid_clear":
-        return "Le balayage de la grille MDCT n'a trouvé aucun alignement d'encodeur, ce qui écarte une source AAC — y compris aux réglages transparents qu'une mesure spectrale ne peut pas voir. Cela ne dit rien du MP3, dont le banc de filtres hybride n'est pas inversible par cette méthode : le point aveugle se rétrécit, il ne se referme pas.";
+        return "Aucun alignement AAC confirmé pour les fenêtres et blocs longs testés. Cela n'exclut pas une source AAC : blocs courts, ré-échantillonnage, bruit ajouté ou transformations peuvent masquer la grille. Le MP3 n'est pas couvert par ce test.";
       case "declared_lossy_codec":
         return `Ce fichier est en ${i.codec.toUpperCase()}, un format avec perte. Il ne se fait pas passer pour autre chose : il n'y a donc pas de transcodage à détecter, et la question à laquelle ce verdict répond — un conteneur sans perte cache-t-il de l'audio avec perte — ne s'applique pas. Toutes les mesures ci-dessous décrivent malgré tout le fichier fidèlement, y compris le passe-bas et la grille de trames de son propre encodeur.`;
       case "content_above_cd_ceiling":
-        return `La bande au-dessus de ${fmtNumber(i.ceiling_khz, 2)} kHz porte du contenu réel — ${fmtNumber(i.level_db, 0)} dB par rapport à la bande située en dessous. Aucun encodage avec perte à la fréquence du CD n'existe à une fréquence d'échantillonnage assez élevée pour l'y mettre : tout ce chemin de transcodage est écarté par la mesure, et non par absence de preuve. C'est le seul élément positif d'authenticité de ce rapport.`;
+        return `Énergie mesurée au-dessus de ${fmtNumber(i.ceiling_khz, 2)} kHz : ${fmtNumber(i.level_db, 0)} dB par rapport à la bande de référence. Du bruit ajouté ou un traitement après transcodage peut recréer cette énergie : elle n'établit pas l'authenticité.`;
       case "decode_incomplete": {
         const quoi =
-          i.skipped_packets === 0
-            ? "le flux a demandé à être redémarré en cours de route (segments chaînés ou changement de format) et le décodage s'est arrêté là"
-            : i.stopped_early
-              ? `${i.skipped_packets} paquet(s) n'ont pas pu être décodés et ont été ignorés, puis le flux a demandé à être redémarré en cours de route et le décodage s'est arrêté là`
-              : `${i.skipped_packets} paquet(s) n'ont pas pu être décodés et ont été ignorés`;
+          i.channels_unequal
+            ? "les canaux ont des longueurs différentes"
+            : i.skipped_packets === 0
+              ? "le flux a changé de format ou demandé un redémarrage et le décodage s'est arrêté là"
+              : i.stopped_early
+                ? `${i.skipped_packets} paquet(s) n'ont pas pu être décodés, puis le décodage a été interrompu par un changement de format ou une demande de redémarrage`
+                : `${i.skipped_packets} paquet(s) n'ont pas pu être décodés et ont été ignorés`;
         return `Une partie de l'audio n'est jamais parvenue à l'analyse : ${quoi}. Toutes les mesures ci-dessous ne décrivent que la portion qui s'est décodée, donc aucun verdict sur le fichier entier ne peut être rendu. Réparez ou ré-extrayez le fichier, puis relancez l'analyse.`;
       }
-      // Un code inconnu vient d'un backend plus récent que cette interface : on retombe sur
-      // la prose anglaise du backend plutôt que de rendre `undefined`.
-      default:
-        return (i as { message: string }).message;
+      default: {
+        const exhaustive: never = i;
+        return exhaustive;
+      }
     }
   },
   findings: {
@@ -354,11 +363,9 @@ const fr: Dict = {
     bitDepthPaddingTitle: (declared, effective) => `Conteneur ${declared} bits contenant de l'audio ${effective} bits`,
     bitDepthPaddingDetail: (effective, activePct) =>
       `Sur les ${activePct} % d'échantillons non silencieux, tous tombent exactement sur la grille de quantification à ${effective} bits : la résolution supplémentaire ne porte aucune information mesurable. C'est compatible avec un simple rembourrage plutôt qu'avec un véritable remastering. À noter : un fichier correctement dithéré avant rembourrage échapperait à ce test.`,
-    upsampledTitle: (declaredKHz, usedKHz) => `${declaredKHz} kHz déclarés, ${usedKHz} kHz utilisés`,
-    upsampledDetail: (pct, sufficientKHz) =>
-      `Le contenu s'arrête à ${pct}% de la bande passante que cette fréquence d'échantillonnage est censée porter${
-        sufficientKHz ? `. Un fichier à ${sufficientKHz} kHz contiendrait tout, sans perte` : ""
-      }. L'audio est intact ; c'est compatible avec un sur-échantillonnage depuis une fréquence plus basse. La mesure tolère 10 % de marge pour absorber la traînée du ré-échantillonneur.`,
+    limitedBandwidthTitle: (declaredKHz, usedKHz) => `Bande limitée à ${usedKHz} kHz (fichier ${declaredKHz} kHz)`,
+    limitedBandwidthDetail: (pct) =>
+      `La limite mesurée représente ${pct} % de la bande disponible. Cela peut venir d'un filtrage natif ou d'un sur-échantillonnage ; cette mesure ne permet ni de retrouver la fréquence d'origine, ni de garantir une conversion sans perte.`,
     clippedRunsTitle: (runs, samples) =>
       `${runs} passage(s) aplati(s) au plein échelle (${samples} échantillons concernés)`,
     clippedRunsDetail:
@@ -385,12 +392,13 @@ const fr: Dict = {
     noEdgeFound: "aucune coupure détectée",
     noLimitMeasured: "aucune limite mesurable",
     steepnessValue: (db, hz) => `${db} dB/kHz à ${hz}`,
-    note: "La bande passante indique où le contenu s'arrête, quand ce point est mesurable ; « aucune limite mesurable » signifie que le balayage n'a trouvé aucun point d'arrêt, ce qui n'est pas la même chose qu'un contenu qui monte jusqu'à Nyquist. La pente est ce qui distingue un encodeur d'un mixage sombre : le filtre d'un codec tombe à pic, un choix de mastering s'estompe progressivement. Cliquez sur le spectrogramme pour déplacer la lecture à cet endroit."
+    note: "La bande passante indique où le contenu s'arrête, quand ce point est mesurable ; « aucune limite mesurable » signifie que le balayage n'a trouvé aucun point d'arrêt, ce qui n'est pas la même chose qu'un contenu qui monte jusqu'à Nyquist. Un filtre de mastering ou un ré-échantillonnage peut produire la même coupure franche qu'un codec : la pente seule ne détermine pas la provenance. Cliquez sur le spectrogramme pour déplacer la lecture à cet endroit."
   },
   loudness: {
     title: "Sonie",
     integratedLoudness: "Sonie intégrée",
     na: "n/d",
+    unknownLayoutNote: "Positions des canaux inconnues : LUFS et plage de sonie non calculés. Les crêtes restent mesurées sur tous les canaux.",
     lufsTargetNote: "le repère marque -14 LUFS, cible courante des plateformes de streaming (une convention, pas une norme)",
     truePeak: "Crête réelle",
     clipWarnNote: "au-dessus du plein échelle — peut écrêter lors d'un ré-échantillonnage ou d'un ré-encodage en aval",
@@ -456,7 +464,7 @@ const fr: Dict = {
     stopbandNote: "de combien la zone au-dessus de la coupure descend sous celle du dessous",
     noStopband: "aucune coupure détectée",
     bandLevels: "Niveaux par bande (dB)",
-    bandLevelsNote: "Niveau moyen de chaque bande, relatif à la plus forte du fichier. C'est la forme spectrale dont le verdict est tiré : un mur d'encodeur y apparaît comme une chute brutale entre deux bandes voisines, un master sombre comme une pente régulière.",
+    bandLevelsNote: "Niveau moyen de chaque bande, relatif à la plus forte du fichier. Une chute entre bandes voisines peut révéler un filtre, mais pas sa cause.",
     toNyquist: "Nyquist"
   },
   compare: {
@@ -465,7 +473,7 @@ const fr: Dict = {
     add: "Comparer avec un autre fichier",
     exit: "Fermer la comparaison",
     metric: "Mesure",
-    note: "Les lignes où les deux fichiers diffèrent sont mises en avant. Là où « mieux » a un sens sans ambiguïté — bande passante, plage dynamique, échantillons écrêtés, grille MDCT — le côté qui mène est signalé. Ailleurs les deux valeurs sont simplement posées côte à côte : arbitrer entre un spectre plus large et un master plus fort demanderait une pondération que cet outil n'a aucune base pour établir.",
+    note: "Les lignes où les deux fichiers diffèrent sont mises en avant. Là où « mieux » a un sens sans ambiguïté — bande passante, plage dynamique, échantillons écrêtés — le côté qui mène est signalé. Ailleurs les deux valeurs sont simplement posées côte à côte : arbitrer entre un spectre plus large et un master plus fort demanderait une pondération que cet outil n'a aucune base pour établir.",
     loading: "Analyse du second fichier…",
     groupDeclared: "Ce que le fichier annonce",
     groupSpectrum: "Ce que le spectre montre",
@@ -499,15 +507,18 @@ const fr: Dict = {
   mdct: {
     title: "Grille MDCT",
     detected: "Grille d'encodeur AAC détectée",
-    clear: "Aucun alignement d'encodeur",
-    notAnalyzed: "Fichier trop court ou trop calme pour être balayé",
+    clear: "Aucun alignement AAC confirmé",
+    notAnalyzed: "Signal exploitable ou variation entre décalages insuffisants pour confirmer",
     offset: "Décalage",
-    zeroed: "Coefficients annulés",
+    zeroed: "Quasi-zéros (confirmation)",
     baseline: "ailleurs",
     strength: "Écart",
+    confirmation: "Confirmation",
+    window: "Fenêtre",
+    sineWindow: "Sinus",
     axisOffset: "décalage de trame (échantillons)",
     chartAria: "Profil du balayage de la grille MDCT",
-    note: "Chaque colonne est un décalage de trame possible ; sa hauteur, la part de coefficients MDCT annulés à ce décalage. Un fichier sans perte se comporte pareil partout — un relief irrégulier et bas. Un encodeur AAC laisse sa grille : un pic unique, à sa position de trame. C'est une propriété structurelle du fichier, indépendante de la forme du spectre, et c'est pourquoi elle voit ce que la pente de coupure ne voit pas. Le MP3 n'est pas couvert : son banc de filtres hybride n'est pas une MDCT simple."
+    note: "Chaque colonne est un décalage de trame possible ; sa hauteur, la part de coefficients MDCT annulés à ce décalage. Un pic isolé peut révéler une grille AAC. Les fenêtres sinus et Kaiser–Bessel sont testées, puis l'alignement doit se confirmer sur des trames distinctes. Ce test structurel complète le spectre ; son absence ne garantit pas une source sans perte. Le MP3 n'est pas couvert : son banc de filtres hybride n'est pas une MDCT simple."
   }
 };
 
@@ -526,6 +537,7 @@ const en: Dict = {
     chooseFile: "Choose a file"
   },
   loading: {
+    progress: (completed, total) => `${completed}/${total} stages complete — stage durations vary`,
     text: "Decoding and analyzing…",
     hint: "Full-length FFT and loudness passes over every sample."
   },
@@ -541,7 +553,7 @@ const en: Dict = {
     },
     indeterminate: {
       label: "Inconclusive",
-      blurb: "No sign of transcoding was found, which is not the same as evidence of authenticity. That is a real answer, not a failure."
+      blurb: "The available evidence cannot establish the source history. This is neither a guarantee of authenticity nor an accusation."
     },
     declaredLossy: {
       label: (codec) => `Lossy format (${codecName(codec)})`,
@@ -571,11 +583,9 @@ const en: Dict = {
     bitDepthPaddingTitle: (declared, effective) => `${declared}-bit container holding ${effective}-bit audio`,
     bitDepthPaddingDetail: (effective, activePct) =>
       `Across the ${activePct}% of samples that are not silent, every one lands exactly on the ${effective}-bit quantization grid, so the extra depth carries no measurable information. That is consistent with padding rather than a genuine remaster. Note that a file properly dithered before padding would escape this test.`,
-    upsampledTitle: (declaredKHz, usedKHz) => `${declaredKHz} kHz declared, ${usedKHz} kHz used`,
-    upsampledDetail: (pct, sufficientKHz) =>
-      `Content stops at ${pct}% of the bandwidth this sample rate exists to carry${
-        sufficientKHz ? `. A ${sufficientKHz} kHz file would hold all of it losslessly` : ""
-      }. The audio is intact; this is consistent with upsampling from a lower rate. The measurement allows 10% of slack to absorb resampler ringing.`,
+    limitedBandwidthTitle: (declaredKHz, usedKHz) => `Bandwidth limited to ${usedKHz} kHz (${declaredKHz} kHz file)`,
+    limitedBandwidthDetail: (pct) =>
+      `The measured limit occupies ${pct}% of the available band. Native filtering and upsampling can both cause this; the measurement cannot recover the original rate or guarantee lossless conversion.`,
     clippedRunsTitle: (runs, samples) => `${runs} flattened run(s) at full scale (${samples} samples involved)`,
     clippedRunsDetail:
       "Consecutive samples pinned at full scale, which is consistent with clipping — the waveform flattened rather than reproduced. A lone full-scale sample is a loud transient, not clipping, so only sustained runs are counted here. The threshold follows the file's declared bit depth."
@@ -601,12 +611,13 @@ const en: Dict = {
     noEdgeFound: "no edge found",
     noLimitMeasured: "no measurable limit",
     steepnessValue: (db, hz) => `${db} dB/kHz @ ${hz}`,
-    note: "Bandwidth is where content stops, when that point is measurable; \"no measurable limit\" means the sweep found no stopping point, which is not the same as content running all the way to Nyquist. Steepness is what separates an encoder from a dark mix: a codec's lowpass falls off a cliff, a mastering choice slopes away. Click the spectrogram to jump playback there."
+    note: "Bandwidth is where content stops, when that point is measurable; \"no measurable limit\" means the sweep found no stopping point, which is not the same as content running all the way to Nyquist. Mastering filters and resampling can produce the same sharp edge as a codec: steepness alone cannot determine provenance. Click the spectrogram to jump playback there."
   },
   loudness: {
     title: "Loudness",
     integratedLoudness: "Integrated loudness",
     na: "n/a",
+    unknownLayoutNote: "Unknown channel positions: LUFS and loudness range withheld. Peaks still include every channel.",
     lufsTargetNote: "tick marks -14 LUFS, a common streaming platform target (a convention, not a standard)",
     truePeak: "True peak",
     clipWarnNote: "above full scale — may clip when resampled or re-encoded downstream",
@@ -681,7 +692,7 @@ const en: Dict = {
     add: "Compare with another file",
     exit: "Close comparison",
     metric: "Measurement",
-    note: "Rows where the two files disagree are brought forward. Where \"better\" is unambiguous — bandwidth, dynamic range, clipped samples, MDCT grid — the leading side is marked. Everywhere else the two values are simply placed side by side: choosing between a wider spectrum and a louder master would need a weighting this tool has no basis to set.",
+    note: "Rows where the two files disagree are brought forward. Where \"better\" is unambiguous — bandwidth, dynamic range, clipped samples — the leading side is marked. Everywhere else the two values are simply placed side by side: choosing between a wider spectrum and a louder master would need a weighting this tool has no basis to set.",
     loading: "Analyzing the second file…",
     groupDeclared: "What the file claims",
     groupSpectrum: "What the spectrum shows",
@@ -715,15 +726,18 @@ const en: Dict = {
   mdct: {
     title: "MDCT grid",
     detected: "AAC encoder grid detected",
-    clear: "No encoder alignment",
-    notAnalyzed: "File too short or too quiet to sweep",
+    clear: "No confirmed AAC alignment",
+    notAnalyzed: "Insufficient usable signal or offset variation for confirmation",
     offset: "Offset",
-    zeroed: "Coefficients zeroed",
+    zeroed: "Near-zeros (confirmation)",
     baseline: "elsewhere",
     strength: "Margin",
+    confirmation: "Confirmation",
+    window: "Window",
+    sineWindow: "Sine",
     axisOffset: "frame offset (samples)",
     chartAria: "MDCT grid sweep profile",
-    note: "Each column is a candidate frame offset; its height is the share of MDCT coefficients reading as zeroed there. A lossless file behaves much the same at every offset — a low, uneven ridge. An AAC encoder leaves its grid behind: a single spike, at its own frame position. This is a structural property of the file, independent of the shape of its spectrum, which is why it sees what the rolloff measurement cannot. MP3 is not covered: its hybrid filterbank is not a plain MDCT."
+    note: "Each column is a candidate frame offset; its height is the share of MDCT coefficients reading as zeroed there. An isolated peak can reveal an AAC grid. Sine and Kaiser–Bessel windows are tested, then the offset must hold on disjoint confirmation frames. This structural test complements the spectrum; a negative search does not establish a lossless source. MP3 is not covered: its hybrid filterbank is not a plain MDCT."
   }
 };
 

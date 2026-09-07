@@ -1,46 +1,23 @@
-//! Detection of an AAC encoder's MDCT quantization grid.
+//! Searches for AAC long-block quantization-grid evidence in decoded PCM.
 //!
-//! This is the one indicator in the project that does not read the spectral envelope, and
-//! it is the reason it can see what `transcode_detect`'s rolloff measurement cannot.
+//! Re-analysis at the encoder's window and alignment can expose unusually many near-zero
+//! transform coefficients. This is a hypothesis test, not a mathematical proof of origin:
+//! structured native signals can also have periodicities, and post-processing can erase
+//! an encoder grid. A negative search never rules out AAC.
 //!
-//! ## Why it works
+//! Both sine and Kaiser–Bessel-derived (alpha = 4) windows are searched. Each winning offset
+//! must exceed the robust-deviation threshold on the sweep AND on disjoint confirmation
+//! frames, compared with control offsets on those same confirmation frames.
 //!
-//! The MDCT is invertible through time-domain alias cancellation: analysing a decoded
-//! signal with the same transform size, window and *frame alignment* the encoder used
-//! returns the encoder's own quantized coefficients. The ones it quantized to zero come
-//! back as zero — buried under whatever requantization noise the container added since, but
-//! still dozens of dB below their neighbours.
+//! Background: Kim & Rafii, "Lossy Audio Compression Identification", EUSIPCO 2018,
+//! https://eurasip.org/Proceedings/Eusipco/Eusipco2018/papers/1570436395.pdf.
+//! Our near-zero-count statistic differs from their adjacent log-energy-difference method;
+//! the paper's accuracy is not this implementation's accuracy. See docs/detection-research.md.
 //!
-//! A genuinely lossless file has no such alignment. Its coefficients are full at every
-//! offset. So the test is not "are there zeros" (a quiet passage or a lowpass produces
-//! plenty) but "is there *one particular offset* at which zeros suddenly appear" — measured
-//! against the same file's own behaviour at all the other offsets, which makes it
-//! self-calibrating rather than dependent on an absolute threshold.
-//!
-//! This is the same idea `bit_depth.rs` applies one level down: a file whose samples land
-//! exactly on a coarser quantization grid than it declares was padded, not remastered. Here
-//! the grid is the encoder's, in the frequency domain.
-//!
-//! ## Scope, and why MP3 is not covered
-//!
-//! AAC transforms with a plain 1024-point MDCT, so re-analysing at the right offset inverts
-//! it exactly. **MP3 does not**: it uses a hybrid filterbank — a 32-band polyphase stage
-//! followed by an 18-point MDCT per subband — which a single 576-point MDCT does not
-//! invert. Measured on this project's corpus, every MP3 fixture scores in the same range as
-//! authentic material (z ≤ 6.1) whatever transform size is tried. Covering MP3 would mean
-//! reimplementing its polyphase stage; that is a separate piece of work, not a threshold to
-//! tune. The blind spot narrows to LAME, it does not close.
-//!
-//! Only the sine window is tested. Apple's encoder uses it for long blocks; the KBD
-//! alternative was measured across the corpus and produced no alignment peak on any fixture,
-//! including the AAC ones this catches with the sine window.
-//!
-//! ## Measured separation
-//!
-//! Across the corpus: 12 authentic fixtures peak at z ≤ 5.4, the three AAC transcodes at
-//! z = 59.8, 125.6 and 279.2 — and all three agree on frame offset 960, which is the
-//! encoder's actual grid rather than a coincidence of noise. [`GRID_DETECTION_Z`] sits in
-//! the empty band between those two groups.
+//! Scope: one energetic channel, 1024-coefficient long blocks. Short blocks, window
+//! transitions, HE-AAC tools, resampling, added noise and edits can evade detection.
+//! MP3's hybrid filterbank is not inverted by this transform. Scores are descriptive robust
+//! deviations, not Gaussian tail probabilities; adding hypotheses requires new validation.
 
 use rustfft::num_complex::Complex32;
 use rustfft::FftPlanner;
@@ -67,17 +44,29 @@ const CONFIRM_FRAMES: usize = 48;
 /// silent lead-in is all zeros at *every* offset and would flatten the contrast the whole
 /// measurement depends on. The silence-padded corpus fixture is exactly this case.
 const SILENT_FRAME_DB: f32 = -60.0;
-/// Robust z-score above which an offset counts as a real grid alignment rather than the
-/// noise any file produces. The corpus leaves an empty band from 6.1 to 59.8; this sits in
-/// it, far enough from the authentic side to absorb material this corpus does not contain.
+/// Required in both passes. Fixed before the new counterexample tests; not a calibrated
+/// false-alarm probability, particularly when searching more than one window hypothesis.
 const GRID_DETECTION_Z: f64 = 20.0;
 /// Minimum samples needed to sweep at all: enough for the offset range plus the confirming
 /// frames.
 const MIN_SAMPLES: usize = AAC_MDCT_N * (CONFIRM_FRAMES + 4);
 
+/// Long-block windows supported by the AAC grid search. A negative search only describes
+/// these hypotheses; short blocks, resampling and other codecs remain outside its scope.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MdctWindow {
+    Sine,
+    KaiserBessel,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct MdctGridAnalysis {
+    /// Window used by the strongest hypothesis, or `None` when no search was possible.
+    pub window: Option<MdctWindow>,
+    /// Independent confirmation score, measured on frames excluded from the initial sweep.
+    pub confirmed_z_score: f64,
     /// True when one frame offset stands out far enough to be an encoder's grid rather than
     /// this file's own noise — see [`GRID_DETECTION_Z`].
     pub grid_detected: bool,
@@ -114,6 +103,8 @@ pub struct MdctGridAnalysis {
 impl MdctGridAnalysis {
     fn not_analyzed() -> Self {
         Self {
+            window: None,
+            confirmed_z_score: 0.0,
             grid_detected: false,
             z_score: 0.0,
             frame_offset: 0,
@@ -150,12 +141,26 @@ pub fn analyze_mdct_grid(decoded: &DecodedAudio) -> MdctGridAnalysis {
         return MdctGridAnalysis::not_analyzed();
     }
 
+    [MdctWindow::Sine, MdctWindow::KaiserBessel]
+        .into_iter()
+        .map(|window| search_window(channel, window))
+        .max_by(|a, b| {
+            a.grid_detected.cmp(&b.grid_detected).then_with(|| {
+                a.z_score
+                    .min(a.confirmed_z_score)
+                    .total_cmp(&b.z_score.min(b.confirmed_z_score))
+            })
+        })
+        .unwrap_or_else(MdctGridAnalysis::not_analyzed)
+}
+
+fn search_window(channel: &[f32], window: MdctWindow) -> MdctGridAnalysis {
     let n = AAC_MDCT_N;
-    let mut mdct = MdctTransform::new(n);
+    let mut mdct = MdctTransform::with_window(n, window);
 
     // Frames are picked from the loud part of the file and reused for every offset, so the
     // sweep compares like with like: an offset must win on the same audio the others saw.
-    let starts = pick_loud_frame_starts(channel, n, SWEEP_FRAMES);
+    let starts = pick_loud_frame_starts(channel, n, SWEEP_FRAMES, &[]);
     if starts.is_empty() {
         return MdctGridAnalysis::not_analyzed();
     }
@@ -190,7 +195,10 @@ pub fn analyze_mdct_grid(decoded: &DecodedAudio) -> MdctGridAnalysis {
 
     // Re-measure the winner over more frames: the sweep only had to rank offsets, but the
     // number that gets compared to a threshold should rest on more than a dozen frames.
-    let confirm_starts = pick_loud_frame_starts(channel, n, CONFIRM_FRAMES);
+    let confirm_starts = pick_loud_frame_starts(channel, n, CONFIRM_FRAMES, &starts);
+    if confirm_starts.len() < 8 {
+        return MdctGridAnalysis::not_analyzed();
+    }
     let confirmed = zero_fraction(
         channel,
         &confirm_starts,
@@ -201,12 +209,38 @@ pub fn analyze_mdct_grid(decoded: &DecodedAudio) -> MdctGridAnalysis {
 
     let z_score = ((best as f64) - median as f64) / sigma as f64;
 
+    // Re-estimate the background on the same confirmation frames, not the sweep's twelve
+    // frames. Offsets are fixed and spread across the frame; exclude the candidate's immediate
+    // neighbourhood so confirmation does not compare the aligned transform with itself.
+    let controls: Vec<f32> = (0..n)
+        .step_by(n / 32)
+        .filter(|&offset| offset.abs_diff(best_offset) > 4)
+        .map(|offset| {
+            zero_fraction(
+                channel,
+                &confirm_starts,
+                offset,
+                &mut mdct,
+                &mut coefficients,
+            )
+        })
+        .collect();
+    let baseline = median_of(&controls);
+    let confirmed_sigma = 1.4826 * median_absolute_deviation(&controls, baseline);
+    let confirmed_z_score = if confirmed_sigma > 0.0 {
+        (confirmed - baseline) as f64 / confirmed_sigma as f64
+    } else {
+        0.0
+    };
+
     MdctGridAnalysis {
-        grid_detected: z_score >= GRID_DETECTION_Z,
+        window: Some(window),
+        confirmed_z_score,
+        grid_detected: z_score >= GRID_DETECTION_Z && confirmed_z_score >= GRID_DETECTION_Z,
         z_score,
         frame_offset: best_offset,
         zero_fraction_at_offset: confirmed as f64,
-        zero_fraction_baseline: median as f64,
+        zero_fraction_baseline: baseline as f64,
         analyzed: true,
         sweep_profile_base64: encode_profile(&zero_fractions, best),
     }
@@ -217,7 +251,12 @@ pub fn analyze_mdct_grid(decoded: &DecodedAudio) -> MdctGridAnalysis {
 /// Silence is the trap here: a digitally silent lead-in produces all-zero coefficients at
 /// every offset, which raises the baseline to 1.0 and erases the contrast the sweep needs.
 /// The corpus's silence-padded fixture measured exactly 0.0 everywhere before this.
-fn pick_loud_frame_starts(channel: &[f32], n: usize, wanted: usize) -> Vec<usize> {
+fn pick_loud_frame_starts(
+    channel: &[f32],
+    n: usize,
+    wanted: usize,
+    excluded: &[usize],
+) -> Vec<usize> {
     let usable = channel.len().saturating_sub(3 * n);
     if usable == 0 {
         return Vec::new();
@@ -229,7 +268,8 @@ fn pick_loud_frame_starts(channel: &[f32], n: usize, wanted: usize) -> Vec<usize
 
     let rms_of = |start: usize| -> f32 {
         let frame = &channel[start..(start + 2 * n).min(channel.len())];
-        (frame.iter().map(|&s| s * s).sum::<f32>() / frame.len() as f32).sqrt()
+        (frame.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>() / frame.len() as f64).sqrt()
+            as f32
     };
 
     let levels: Vec<(usize, f32)> = (0..candidate_count)
@@ -243,7 +283,7 @@ fn pick_loud_frame_starts(channel: &[f32], n: usize, wanted: usize) -> Vec<usize
 
     let loud: Vec<usize> = levels
         .iter()
-        .filter(|&&(_, r)| r > floor)
+        .filter(|&&(s, r)| r > floor && excluded.iter().all(|&other| s.abs_diff(other) >= 3 * n))
         .map(|&(s, _)| s)
         .collect();
     if loud.is_empty() {
@@ -276,11 +316,11 @@ fn zero_fraction(
         }
         mdct.transform(&channel[from..from + 2 * n], coefficients);
 
-        let energy: f32 = coefficients.iter().map(|&c| c * c).sum();
+        let energy: f64 = coefficients.iter().map(|&c| (c as f64) * (c as f64)).sum();
         if energy <= 0.0 {
             continue;
         }
-        let rms = (energy / n as f32).sqrt();
+        let rms = (energy / n as f64).sqrt() as f32;
         let threshold = rms * ratio;
         zeros += coefficients
             .iter()
@@ -311,14 +351,17 @@ struct MdctTransform {
 }
 
 impl MdctTransform {
-    fn new(n: usize) -> Self {
+    fn with_window(n: usize, window: MdctWindow) -> Self {
         let mut planner = FftPlanner::<f32>::new();
         let fft = planner.plan_fft_forward(2 * n);
         let (pre, post) = twiddles(n);
         let fft_scratch = vec![Complex32::new(0.0, 0.0); fft.get_inplace_scratch_len()];
         Self {
             n,
-            window: sine_window(2 * n),
+            window: match window {
+                MdctWindow::Sine => sine_window(2 * n),
+                MdctWindow::KaiserBessel => kbd_window(n),
+            },
             pre,
             post,
             fft,
@@ -358,8 +401,44 @@ impl MdctTransform {
 /// The sine window AAC uses for long blocks.
 fn sine_window(len: usize) -> Vec<f32> {
     (0..len)
-        .map(|i| (std::f32::consts::PI / len as f32 * (i as f32 + 0.5)).sin())
+        .map(|i| (std::f64::consts::PI / len as f64 * (i as f64 + 0.5)).sin() as f32)
         .collect()
+}
+
+/// AAC long-block Kaiser–Bessel-derived window (alpha = 4). The rising half is the
+/// square root of the normalized cumulative Kaiser window; reflection supplies the falling
+/// half. The n+1 Kaiser terms are essential to the Princen–Bradley overlap condition.
+/// See ISO/IEC 14496-3, AAC filterbank windowing. No codec implementation is copied here.
+fn kbd_window(n: usize) -> Vec<f32> {
+    let bessel_i0 = |x: f64| {
+        let mut sum = 1.0;
+        let mut term = 1.0;
+        for k in 1..=64 {
+            term *= (x / (2.0 * k as f64)).powi(2);
+            sum += term;
+            if term < sum * f64::EPSILON {
+                break;
+            }
+        }
+        sum
+    };
+    let kaiser: Vec<f64> = (0..=n)
+        .map(|i| {
+            let position = 2.0 * i as f64 / n as f64 - 1.0;
+            bessel_i0(4.0 * std::f64::consts::PI * (1.0 - position * position).max(0.0).sqrt())
+        })
+        .collect();
+    let total: f64 = kaiser.iter().sum();
+    let mut cumulative = 0.0;
+    let mut window: Vec<f32> = kaiser[..n]
+        .iter()
+        .map(|&value| {
+            cumulative += value;
+            (cumulative / total).sqrt() as f32
+        })
+        .collect();
+    window.extend(window.clone().into_iter().rev());
+    window
 }
 
 /// Pre-twiddle (`2n` long) and post-twiddle (`n` long) that turn a plain DFT into an MDCT.
@@ -410,9 +489,15 @@ mod tests {
     /// module reports is measuring the wrong thing.
     #[test]
     fn fft_mdct_matches_the_direct_definition() {
+        for window in [MdctWindow::Sine, MdctWindow::KaiserBessel] {
+            check_direct_definition(window);
+        }
+    }
+
+    fn check_direct_definition(window_kind: MdctWindow) {
         let n = 64;
-        let mut mdct = MdctTransform::new(n);
-        let window = sine_window(2 * n);
+        let mut mdct = MdctTransform::with_window(n, window_kind);
+        let window = mdct.window.clone();
 
         // Deterministic pseudo-random input; the exact values do not matter, only that they
         // are not symmetric in a way that could hide an indexing error.
@@ -445,6 +530,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn both_windows_satisfy_the_overlap_add_identity() {
+        let n = AAC_MDCT_N;
+        for window in [sine_window(2 * n), kbd_window(n)] {
+            for i in 0..n {
+                assert!((window[i].powi(2) + window[i + n].powi(2) - 1.0).abs() < 2e-7);
+                assert!((window[i] - window[2 * n - 1 - i]).abs() < 2e-7);
+            }
+        }
+    }
+
+    #[test]
+    fn confirmation_frames_do_not_reuse_sweep_samples_at_any_offset() {
+        let n = AAC_MDCT_N;
+        let samples = vec![0.25; n * 200];
+        let sweep = pick_loud_frame_starts(&samples, n, SWEEP_FRAMES, &[]);
+        let confirmation = pick_loud_frame_starts(&samples, n, CONFIRM_FRAMES, &sweep);
+        assert!(confirmation.len() >= 8);
+        for &start in &confirmation {
+            assert!(sweep.iter().all(|&other| start.abs_diff(other) >= 3 * n));
+        }
+    }
+
     /// White noise has no encoder grid, so no offset may stand out. Guards the direction
     /// that matters: this indicator accusing a lossless file.
     #[test]
@@ -460,6 +568,7 @@ mod tests {
         let decoded = DecodedAudio {
             sample_rate: 44_100,
             channels: 1,
+            channel_layout: symphonia::core::audio::Channels::Discrete(1),
             codec_short_name: "flac".into(),
             container_short_name: "flac".into(),
             bits_per_sample: Some(16),

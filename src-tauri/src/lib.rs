@@ -27,6 +27,7 @@ pub fn run() {
         // machine with no output device still analyses files and simply reports that
         // playback is unavailable.
         .manage(player::Player::new())
+        .manage(commands::AnalysisRequests::default())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             commands::analyze_file,

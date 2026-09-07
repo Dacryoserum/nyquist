@@ -20,6 +20,8 @@ export interface SignalAnalysis {
   true_peak_dbtp: number;
   rms_dbfs: number;
   lufs_integrated: number | null;
+  /** False when channel positions are unknown: LUFS/LRA are deliberately withheld. */
+  loudness_layout_supported: boolean;
   /** EBU Tech 3342 Loudness Range, in LU — companion metric to lufs_integrated. */
   loudness_range_lu: number | null;
   /** Oversampling factor ebur128 applied: 4 below 96 kHz, 2 up to 192, and 1 at 192 kHz and
@@ -112,13 +114,14 @@ export interface StereoAnalysis {
 }
 
 export interface SpectralAnalysis {
+  /** False for silence or spectra at the numerical analysis floor. */
+  has_signal: boolean;
   /** Where content stops. **null when nothing bounded it**, which is not the same as
    * "reaches Nyquist" and must never be rendered as a frequency. Raw measurement, not a
    * transcode verdict — see spectral.rs module docs. */
   spectral_cutoff_hz: number | null;
   rolloff_steepness_db_per_khz: number;
-  /** Position of the codec-like edge, or null when no lowpass exists anywhere above 8 kHz
-   * — the latter being the evidence behind a "probably authentic" verdict. */
+  /** Position of a sharp sustained edge, not proof of an encoder's involvement. */
   encoder_edge_hz: number | null;
   /** Same length/time alignment as spectrogram.time_bin_count. */
   cutoff_over_time_hz: number[];
@@ -131,7 +134,7 @@ export interface SpectralAnalysis {
   stopband_depth_db: number | null;
   /** Level of the top quarter of the declared band (never below the 22.05 kHz CD ceiling)
    * relative to the 1–22.05 kHz reference band, in dB. null at 44.1/48 kHz, where the
-   * question does not arise. The only positive evidence of authenticity in the report. */
+   * question does not arise. Added noise can fill this band; it never establishes provenance. */
   above_cd_ceiling_db: number | null;
   spectrogram: SpectrogramData;
 }
@@ -162,7 +165,8 @@ export type IndicatorDetail =
       additional_tags: number;
     }
   | { code: "tag_is_only_evidence" }
-  | { code: "tag_contradicts_spectrum" }
+  | { code: "insufficient_signal" }
+  | { code: "integrity_mismatch" }
   | { code: "invalid_sample_rate" }
   | { code: "sharp_rolloff"; steepness_db_per_khz: number; edge_khz: number }
   | { code: "no_encoder_lowpass"; scanned_from_khz: number; nyquist_khz: number }
@@ -171,6 +175,8 @@ export type IndicatorDetail =
   | {
       code: "mdct_grid_aligned";
       z_score: number;
+      confirmed_z_score: number;
+      window: MdctWindow;
       frame_offset: number;
       zero_percent: number;
       baseline_percent: number;
@@ -178,7 +184,7 @@ export type IndicatorDetail =
   | { code: "mdct_grid_clear" }
   | { code: "content_above_cd_ceiling"; level_db: number; ceiling_khz: number }
   | { code: "declared_lossy_codec"; codec: string }
-  | { code: "decode_incomplete"; skipped_packets: number; stopped_early: boolean };
+  | { code: "decode_incomplete"; skipped_packets: number; stopped_early: boolean; channels_unequal: boolean };
 
 /** A piece of evidence, carrying the backend's English prose *and* the raw observation.
  *
@@ -215,27 +221,26 @@ export interface BitDepthAnalysis {
   active_sample_ratio: number;
 }
 
-/** The sample-rate counterpart to BitDepthAnalysis: a file resampled up to a hi-res rate
- * it never earns. Lossless throughout, so invisible to the transcode verdict. */
+/** Measured bandwidth occupancy, not an estimate of the original recording rate. */
 export interface SampleRateAnalysis {
   declared_sample_rate_hz: number;
   /** null when the bandwidth was not measured at all — never a Nyquist stand-in. */
   content_bandwidth_hz: number | null;
   /** content_bandwidth_hz as a fraction of the declared Nyquist; null when unmeasured. */
   bandwidth_ratio: number | null;
-  /** Set only on a bandwidth that was actually measured. */
-  likely_upsampled: boolean;
-  /** Smallest standard rate that would carry this content losslessly, when flagged. */
-  sufficient_sample_rate_hz: number | null;
+  /** Limited measured bandwidth in a hi-res file; filtering and upsampling are ambiguous. */
+  bandwidth_limited: boolean;
 }
 
-/** AAC encoder frame-grid alignment. Mirrors `MdctGridAnalysis` in mdct_grid.rs.
- *
- * Unlike the stereo image, this one *does* feed the verdict: an alignment at which the
- * file's own MDCT coefficients collapse is an encoder's quantization grid, which lossless
- * audio has no reason to exhibit. Covers AAC only — MP3's hybrid filterbank is not a plain
- * MDCT and cannot be inverted this way. */
+/** The two long-block window hypotheses supported by the AAC search. */
+export type MdctWindow = "sine" | "kaiser_bessel";
+
+/** Confirmed AAC long-block grid evidence, not proof of origin. A negative search does
+ * not exclude AAC; MP3's hybrid filterbank is outside this test's scope. */
 export interface MdctGridAnalysis {
+  window: MdctWindow | null;
+  /** Robust deviation on disjoint confirmation frames; both passes must exceed threshold. */
+  confirmed_z_score: number;
   grid_detected: boolean;
   /** Robust standard deviations above the file's own median offset. */
   z_score: number;
@@ -243,7 +248,7 @@ export interface MdctGridAnalysis {
   frame_offset: number;
   zero_fraction_at_offset: number;
   zero_fraction_baseline: number;
-  /** false when the file was too short or too quiet to sweep; other fields are then void. */
+  /** false when usable frames or offset variation were insufficient for confirmation. */
   analyzed: boolean;
   /** One byte per candidate offset (1024 of them), each the zero-fraction there scaled
    * against the strongest, base64-encoded. Drawn as-is by MdctGrid.svelte: the shape is the
@@ -269,8 +274,15 @@ export interface AnalysisResult {
   mdct_grid: MdctGridAnalysis;
 }
 
-export function analyzeFile(path: string): Promise<AnalysisResult> {
-  return invoke<AnalysisResult>("analyze_file", { path });
+/** Request-scoped progress counts completed stages, not elapsed-time percentages. */
+export interface AnalysisProgress {
+  request_id: string;
+  completed_stages: number;
+  total_stages: number;
+}
+
+export function analyzeFile(path: string, requestId: string, loadPlayback: boolean): Promise<AnalysisResult> {
+  return invoke<AnalysisResult>("analyze_file", { path, requestId, loadPlayback });
 }
 
 /** Everything the transport needs to draw itself, returned by every player call.
