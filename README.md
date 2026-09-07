@@ -108,9 +108,15 @@ Checks, all of which CI enforces on every PR:
 ```bash
 npm run check && npm run build              # frontend
 cd src-tauri
-cargo test --release -- --nocapture         # includes the corpus false-positive report
-cargo clippy --all-targets -- -D warnings
+cargo fmt --all -- --check
+cargo build --locked --workspace
+cargo clippy --locked --workspace --all-targets -- -D warnings
+cargo test --locked --workspace -- --nocapture  # includes the corpus false-positive report
 ```
+
+CI shares the optimized dev profile between build, Clippy and tests; shipped installers
+still use the release profile. See [CI and packaging performance](docs/ci-performance.md)
+for cache behavior and the independently gated, parallel packaging workflow.
 
 The headless CLI shares the exact analysis pipeline as the app:
 

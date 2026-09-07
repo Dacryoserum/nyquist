@@ -46,8 +46,6 @@ releases start shipping.
   `sufficient_sample_rate_hz`, ajout de la validité spectrale, du statut de placement des
   canaux et de la fenêtre/confirmation MDCT. Version d'analyse : `0.6.0`.
 
-### Modifié
-
 - CI : build, Clippy et tests partagent un profil optimisé sans symboles de debug ; tous
   les contrôles macOS/Windows et les tests du corpus sont conservés.
 - Le packaging tourne en parallèle de la validation. Le brouillon de release n'est créé
