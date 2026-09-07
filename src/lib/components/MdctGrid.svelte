@@ -118,6 +118,14 @@
         <dt>{T.mdct.strength}</dt>
         <dd>{grid.z_score.toFixed(1)} σ</dd>
       </div>
+      <div>
+        <dt>{T.mdct.confirmation}</dt>
+        <dd>{grid.confirmed_z_score.toFixed(1)} σ</dd>
+      </div>
+      <div>
+        <dt>{T.mdct.window}</dt>
+        <dd>{grid.window === "kaiser_bessel" ? "Kaiser–Bessel" : T.mdct.sineWindow}</dd>
+      </div>
     </dl>
 
     <p class="note">{T.mdct.note}</p>

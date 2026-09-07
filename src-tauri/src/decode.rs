@@ -6,6 +6,7 @@
 use std::fs::File;
 use std::path::Path;
 
+use symphonia::core::audio::Channels;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error as SymphoniaError;
 use symphonia::core::formats::probe::Hint;
@@ -63,9 +64,12 @@ impl DecodeStatus {
     }
 }
 
+/// Decoded PCM and the channel positions required to interpret it correctly.
 pub struct DecodedAudio {
     pub sample_rate: u32,
     pub channels: usize,
+    /// Canonical speaker positions (or the decoder's explicit unknown/discrete layout).
+    pub channel_layout: Channels,
     pub codec_short_name: String,
     pub container_short_name: String,
     pub bits_per_sample: Option<u32>,
@@ -130,6 +134,7 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
 
     let mut sample_rate: u32 = 0;
     let mut channels: usize = 0;
+    let mut channel_layout = Channels::None;
     let mut channel_samples: Vec<Vec<f32>> = Vec::new();
     let mut interleaved_buf: Vec<f32> = Vec::new();
     let mut skipped_packets: usize = 0;
@@ -170,13 +175,25 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
                 return Err("decoded audio reports zero channels".to_string());
             }
             sample_rate = audio_buf.spec().rate();
+            channel_layout = audio_buf.spec().channels().clone();
             channel_samples = vec![Vec::new(); channels];
+        } else if sample_rate != audio_buf.spec().rate()
+            || channel_layout != *audio_buf.spec().channels()
+        {
+            // Concatenating different rates/layouts makes every subsequent sample index
+            // describe the wrong time or speaker. Keep only the first, explicitly partial,
+            // segment just as for a demuxer ResetRequired.
+            stopped_early = true;
+            break;
         }
 
         interleaved_buf.resize(audio_buf.samples_interleaved(), 0.0f32);
         audio_buf.copy_to_slice_interleaved(&mut interleaved_buf);
 
         for (i, sample) in interleaved_buf.iter().enumerate() {
+            if !sample.is_finite() {
+                return Err("decoded audio contains a non-finite sample".to_string());
+            }
             channel_samples[i % channels].push(*sample);
         }
     }
@@ -191,6 +208,7 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
     Ok(DecodedAudio {
         sample_rate,
         channels,
+        channel_layout,
         codec_short_name,
         container_short_name,
         bits_per_sample,

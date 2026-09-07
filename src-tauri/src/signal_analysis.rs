@@ -1,9 +1,10 @@
 //! RMS, peak, true peak, LUFS, and clipping — see
 //! `.claude/skills/dsp-correctness/SKILL.md` before touching this file.
 
-use ebur128::{EbuR128, Mode};
+use ebur128::{Channel, EbuR128, Mode};
 use rayon::prelude::*;
 use serde::Serialize;
+use symphonia::core::audio::{ChannelLabel, Channels, Position};
 
 use crate::decode::DecodedAudio;
 
@@ -86,6 +87,9 @@ pub struct ChannelStats {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub struct SignalAnalysis {
+    /// False for channel layouts whose BS.1770 speaker weights are unknown. LUFS and LRA
+    /// are withheld for those layouts; sampled and true peaks remain measurable.
+    pub loudness_layout_supported: bool,
     pub peak_dbfs: f64,
     pub true_peak_dbtp: f64,
     pub rms_dbfs: f64,
@@ -200,6 +204,7 @@ pub fn analyze_signal(decoded: &DecodedAudio) -> Result<SignalAnalysis, String> 
     let loudness = loudness?;
 
     Ok(SignalAnalysis {
+        loudness_layout_supported: loudness.loudness_layout_supported,
         peak_dbfs: linear_to_db(overall_peak_linear),
         true_peak_dbtp: loudness.true_peak_dbtp,
         true_peak_oversampling: loudness.true_peak_oversampling,
@@ -230,6 +235,7 @@ pub fn analyze_signal(decoded: &DecodedAudio) -> Result<SignalAnalysis, String> 
 fn measure_loudness(decoded: &DecodedAudio) -> Result<LoudnessMeasurement, String> {
     if decoded.channels == 0 || decoded.sample_rate == 0 {
         return Ok(LoudnessMeasurement {
+            loudness_layout_supported: false,
             lufs_integrated: None,
             loudness_range_lu: None,
             true_peak_dbtp: SILENCE_FLOOR_DB,
@@ -243,24 +249,37 @@ fn measure_loudness(decoded: &DecodedAudio) -> Result<LoudnessMeasurement, Strin
         .map(|c| c.as_slice())
         .collect();
 
-    let run = |mode: Mode| -> Result<EbuR128, String> {
+    let channel_map = loudness_channel_map(&decoded.channel_layout);
+    let run = |mode: Mode, mapping: Option<&[Channel]>| -> Result<EbuR128, String> {
         let mut meter = EbuR128::new(decoded.channels as u32, decoded.sample_rate, mode)
             .map_err(|e| format!("could not initialize loudness meter: {e}"))?;
+        if let Some(mapping) = mapping {
+            meter
+                .set_channel_map(mapping)
+                .map_err(|e| format!("could not configure loudness channels: {e}"))?;
+        }
         meter
             .add_frames_planar_f32(&channel_refs)
             .map_err(|e| format!("loudness analysis failed: {e}"))?;
         Ok(meter)
     };
 
-    let (loudness_meter, true_peak_meter) =
-        rayon::join(|| run(Mode::I | Mode::LRA), || run(Mode::TRUE_PEAK));
+    let (loudness_meter, true_peak_meter) = rayon::join(
+        || {
+            channel_map
+                .as_ref()
+                .map(|map| run(Mode::I | Mode::LRA, Some(map)))
+                .transpose()
+        },
+        || run(Mode::TRUE_PEAK, None),
+    );
     let loudness_meter = loudness_meter?;
     let true_peak_meter = true_peak_meter?;
 
-    let lufs_integrated = match loudness_meter.loudness_global() {
-        Ok(lufs) if lufs.is_finite() => Some(lufs),
-        _ => None,
-    };
+    let lufs_integrated = loudness_meter
+        .as_ref()
+        .and_then(|meter| meter.loudness_global().ok())
+        .filter(|value| value.is_finite());
     // EBU Tech 3342 measures the spread between the 10th and 95th percentile of gated
     // 3-second short-term windows. A clip too short to fill more than a handful of those
     // windows has no spread to speak of, and `loudness_range()` returns a finite 0.0 for it —
@@ -271,10 +290,12 @@ fn measure_loudness(decoded: &DecodedAudio) -> Result<LoudnessMeasurement, Strin
         .first()
         .map(|c| c.len() as f64 / decoded.sample_rate as f64)
         .unwrap_or(0.0);
-    let loudness_range_lu = match loudness_meter.loudness_range() {
-        Ok(lra) if lra.is_finite() && duration_s >= MIN_LRA_DURATION_S => Some(lra),
-        _ => None,
-    };
+    let loudness_range_lu = loudness_meter
+        .as_ref()
+        .and_then(|meter| meter.loudness_range().ok())
+        .filter(|value| {
+            value.is_finite() && lufs_integrated.is_some() && duration_s >= MIN_LRA_DURATION_S
+        });
 
     // Propagated, not swallowed. `unwrap_or(0.0)` turned a library failure into a linear
     // peak of zero, which `linear_to_db` rendered as a plausible-looking -120 dBTP on a track
@@ -288,6 +309,7 @@ fn measure_loudness(decoded: &DecodedAudio) -> Result<LoudnessMeasurement, Strin
     }
 
     Ok(LoudnessMeasurement {
+        loudness_layout_supported: channel_map.is_some(),
         lufs_integrated,
         loudness_range_lu,
         true_peak_dbtp: linear_to_db(true_peak_linear),
@@ -298,10 +320,60 @@ fn measure_loudness(decoded: &DecodedAudio) -> Result<LoudnessMeasurement, Strin
 /// What `ebur128` produced, kept as named fields rather than a tuple now that there are four
 /// of them and two are easy to swap by accident.
 struct LoudnessMeasurement {
+    loudness_layout_supported: bool,
     lufs_integrated: Option<f64>,
     loudness_range_lu: Option<f64>,
     true_peak_dbtp: f64,
     true_peak_oversampling: u32,
+}
+
+/// Maps canonical Symphonia speaker positions to BS.1770 weights through ebur128. In
+/// particular, 7.1 side channels must not become `Unused`, as they do in its default map.
+/// Ambisonic/discrete multichannel audio requires a rendering layout and is left unmeasured.
+fn loudness_channel_map(layout: &Channels) -> Option<Vec<Channel>> {
+    let positioned = |position| {
+        Some(match position {
+            Position::FRONT_LEFT => Channel::Left,
+            Position::FRONT_RIGHT => Channel::Right,
+            Position::FRONT_CENTER => Channel::Center,
+            Position::LFE1 | Position::LFE2 => Channel::Unused,
+            Position::REAR_LEFT => Channel::Mp135,
+            Position::REAR_RIGHT => Channel::Mm135,
+            Position::SIDE_LEFT => Channel::Mp090,
+            Position::SIDE_RIGHT => Channel::Mm090,
+            Position::REAR_CENTER => Channel::Mp180,
+            Position::FRONT_LEFT_CENTER => Channel::MpSC,
+            Position::FRONT_RIGHT_CENTER => Channel::MmSC,
+            Position::FRONT_LEFT_WIDE => Channel::Mp060,
+            Position::FRONT_RIGHT_WIDE => Channel::Mm060,
+            Position::TOP_CENTER => Channel::Tp000,
+            Position::TOP_FRONT_LEFT => Channel::Up030,
+            Position::TOP_FRONT_CENTER => Channel::Up000,
+            Position::TOP_FRONT_RIGHT => Channel::Um030,
+            Position::TOP_REAR_LEFT => Channel::Up135,
+            Position::TOP_REAR_CENTER => Channel::Up180,
+            Position::TOP_REAR_RIGHT => Channel::Um135,
+            Position::TOP_SIDE_LEFT => Channel::Up090,
+            Position::TOP_SIDE_RIGHT => Channel::Um090,
+            Position::BOTTOM_FRONT_CENTER => Channel::Bp000,
+            Position::BOTTOM_FRONT_LEFT => Channel::Bp045,
+            Position::BOTTOM_FRONT_RIGHT => Channel::Bm045,
+            _ => return None,
+        })
+    };
+    match layout {
+        Channels::Positioned(positions) => positions.iter().map(positioned).collect(),
+        Channels::Custom(labels) => labels
+            .iter()
+            .map(|label| match label {
+                ChannelLabel::Positioned(position) => positioned(*position),
+                _ => None,
+            })
+            .collect(),
+        Channels::Discrete(1) => Some(vec![Channel::Center]),
+        Channels::Discrete(2) => Some(vec![Channel::Left, Channel::Right]),
+        _ => None,
+    }
 }
 
 /// The oversampling factor `ebur128` applies at a given rate, per its own documentation:

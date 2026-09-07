@@ -228,6 +228,7 @@ fn decoded_for_test(sample_rate: u32, bits: Option<u32>, channels: Vec<Vec<f32>>
     DecodedAudio {
         sample_rate,
         channels: channels.len(),
+        channel_layout: symphonia::core::audio::Channels::Discrete(channels.len() as u16),
         codec_short_name: "flac".into(),
         container_short_name: "flac".into(),
         bits_per_sample: bits,

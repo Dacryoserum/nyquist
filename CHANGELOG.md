@@ -4,7 +4,47 @@ All notable changes to this project are documented here. Format loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow SemVer once
 releases start shipping.
 
-## [Unreleased]
+## [Non publié]
+
+## [0.6.0] - 2026-09-07
+
+### Ajouté
+
+- Recherche AAC à fenêtres sinus et Kaiser–Bessel, avec confirmation de l'alignement sur
+  des trames distinctes et affichage des deux scores. Un transcodage AAC natif FFmpeg
+  jusque-là manqué est maintenant détecté ; aucune dépendance supplémentaire.
+- Corpus de contre-exemples reproductibles : filtres natifs, ré-échantillonnage sans perte,
+  ajout de bruit après MP3, silence hi-res, canaux 7.1. Études et limites documentées dans
+  `docs/detection-research.md`.
+- Progression par étapes sur les événements Tauri, associée à chaque requête d'analyse.
+
+### Corrigé
+
+- Le spectre moyenne les puissances des canaux, sans annuler les pistes en opposition de
+  phase. Le silence ne produit plus de faux indice d'énergie ultrasonique.
+- LUFS utilise les positions des haut-parleurs fournies par le décodeur : les canaux
+  latéraux 7.1 sont pris en compte, le LFE est exclu. Si le placement multicanal est inconnu,
+  LUFS/LRA restent indisponibles ; les crêtes incluent toujours tous les canaux.
+- Une somme de contrôle invalide suspend le verdict ; les changements de fréquence ou de
+  disposition des canaux interrompent explicitement l'analyse au lieu de concaténer des
+  segments incompatibles. Les échantillons non finis sont rejetés.
+- La comparaison ne remplace plus l'audio du fichier principal. Une analyse devenue
+  obsolète ne peut plus charger ses échantillons dans le lecteur. Les analyses lourdes
+  concurrentes sont mises en file pour éviter plusieurs décodages complets simultanés.
+
+### Modifié
+
+- Une coupure spectrale ou un tag d'encodeur ne suffit plus à accuser un fichier ; l'énergie
+  ultrasonique ne suffit plus à l'authentifier. Sur le corpus initial de 20 fichiers : les
+  3 AAC restent détectés, 7 MP3 deviennent/restent indéterminés (contre 2 auparavant), aucun
+  faux positif. Les 5 détections MP3 uniquement spectrales sont volontairement retirées pour
+  ne plus confondre filtrage légitime et compression avec perte.
+- La bande passante limitée ne prétend plus prouver un sur-échantillonnage ni garantir une
+  conversion sans perte vers une fréquence inférieure. Un test AAC négatif n'exclut plus
+  l'AAC dans les explications françaises, anglaises et exportées.
+- Contrat JSON modifié : `bandwidth_limited` remplace `likely_upsampled`, suppression de
+  `sufficient_sample_rate_hz`, ajout de la validité spectrale, du statut de placement des
+  canaux et de la fenêtre/confirmation MDCT. Version d'analyse : `0.6.0`.
 
 ### Modifié
 

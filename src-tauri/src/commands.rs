@@ -3,37 +3,107 @@
 //! [`AnalysisResult`] — the frontend types in `src/lib/api.ts` must move with it.
 
 use std::path::PathBuf;
+use std::sync::{
+    atomic::{AtomicUsize, Ordering},
+    Mutex,
+};
 
-use tauri::Manager;
+use serde::Serialize;
+use tauri::{Emitter, Manager};
 
 use crate::analysis::{self, AnalysisResult};
 use crate::player::{PlaybackState, Player};
 
-/// Decodes and analyzes an audio file.
-///
-/// Runs on a blocking task rather than the async/event thread — decode + signal analysis
-/// is CPU-bound and can take seconds on large high-res files, and must never freeze the
-/// UI. Percentage progress events are deferred until a stage slow enough to need them
-/// exists — measured ~1.6s in release for decode+signal+spectral+transcode combined on a
-/// 7-minute 24-bit FLAC, see `.claude/CONTEXT.md` — well under the threshold that would
-/// justify it.
+/// Serializes memory-heavy analyses and protects playback publication from stale requests.
+#[derive(Default)]
+pub(crate) struct AnalysisRequests {
+    pipeline: Mutex<()>,
+    latest_playback: Mutex<Option<String>>,
+}
+
+impl AnalysisRequests {
+    fn begin_playback(&self, request_id: String, reset: impl FnOnce()) {
+        let mut latest = self.latest_playback.lock().unwrap();
+        *latest = Some(request_id);
+        reset();
+    }
+
+    fn is_current(&self, request_id: &str) -> bool {
+        self.latest_playback.lock().unwrap().as_deref() == Some(request_id)
+    }
+
+    fn publish_playback(&self, request_id: &str, publish: impl FnOnce()) -> Result<(), String> {
+        let latest = self.latest_playback.lock().unwrap();
+        if latest.as_deref() != Some(request_id) {
+            return Err("analysis superseded by a newer file".to_string());
+        }
+        publish();
+        Ok(())
+    }
+}
+
+/// Completed stages, not a percentage of elapsed time: parallel stages have unequal costs.
+#[derive(Clone, Serialize)]
+struct AnalysisProgress<'a> {
+    request_id: &'a str,
+    completed_stages: usize,
+    total_stages: usize,
+}
+
+/// Analyzes off the event thread and emits request-scoped stage progress.
+/// Comparison requests never change playback. Only the latest primary request may publish
+/// samples, and queued obsolete requests are discarded before allocating decoded audio.
 #[tauri::command]
-pub async fn analyze_file(app: tauri::AppHandle, path: String) -> Result<AnalysisResult, String> {
-    let (result, decoded) = tauri::async_runtime::spawn_blocking(move || {
-        analysis::analyze_with_audio(&PathBuf::from(path))
+pub async fn analyze_file(
+    app: tauri::AppHandle,
+    path: String,
+    request_id: String,
+    load_playback: bool,
+) -> Result<AnalysisResult, String> {
+    if load_playback {
+        let requests = app.state::<AnalysisRequests>();
+        // Stop the old file immediately, including when the new analysis later fails.
+        requests.begin_playback(request_id.clone(), || app.state::<Player>().unload());
+    }
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let requests = app.state::<AnalysisRequests>();
+        // No analysis data lives behind this gate. A failed worker may poison it, but a
+        // subsequent independent file can safely run after the guard is recovered.
+        let _pipeline = requests
+            .pipeline
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if load_playback && !requests.is_current(&request_id) {
+            return Err("analysis superseded by a newer file".to_string());
+        }
+        let completed = AtomicUsize::new(0);
+        let report_progress = || {
+            let _ = app.emit(
+                "analysis-progress",
+                AnalysisProgress {
+                    request_id: &request_id,
+                    completed_stages: completed.fetch_add(1, Ordering::Relaxed),
+                    total_stages: analysis::PROGRESS_STAGE_COUNT,
+                },
+            );
+        };
+        report_progress();
+        let (result, decoded) =
+            analysis::analyze_with_progress(&PathBuf::from(path), &report_progress)?;
+
+        if load_playback {
+            // Keep the guard through publication: a newer request cannot start between
+            // the freshness check and replacing the loaded samples.
+            requests.publish_playback(&request_id, || {
+                // An unavailable audio device must not discard an otherwise valid report.
+                let _ = app.state::<Player>().load(decoded);
+            })?;
+        }
+        Ok(result)
     })
     .await
-    .map_err(|e| format!("analysis task panicked: {e}"))??;
-
-    // Playback is loaded from the very samples that produced the report, so the player's
-    // clock and the report's clock are the same clock — see player.rs on why that is the
-    // whole point. A machine with no audio output still gets its analysis: the load failure
-    // is swallowed here and surfaces as "no track loaded" on the next player call.
-    let player = app.state::<Player>();
-    player.unload();
-    let _ = player.load(decoded);
-
-    Ok(result)
+    .map_err(|e| format!("analysis task panicked: {e}"))?
 }
 
 /// Transport controls for the loaded track.
@@ -77,4 +147,34 @@ pub fn player_state(app: tauri::AppHandle) -> Result<PlaybackState, String> {
 #[tauri::command]
 pub fn export_report(path: String, json: String) -> Result<(), String> {
     std::fs::write(path, json).map_err(|e| format!("cannot write report: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_obsolete_analysis_cannot_replace_the_latest_playback() {
+        let requests = AnalysisRequests::default();
+        let resets = AtomicUsize::new(0);
+        requests.begin_playback("first".into(), || {
+            resets.fetch_add(1, Ordering::Relaxed);
+        });
+        requests.begin_playback("second".into(), || {
+            resets.fetch_add(1, Ordering::Relaxed);
+        });
+        assert!(!requests.is_current("first"));
+        assert!(requests.is_current("second"));
+        assert!(requests
+            .publish_playback("first", || panic!("stale samples published"))
+            .is_err());
+        let published = AtomicUsize::new(0);
+        requests
+            .publish_playback("second", || {
+                published.fetch_add(1, Ordering::Relaxed);
+            })
+            .unwrap();
+        assert_eq!(published.load(Ordering::Relaxed), 1);
+        assert_eq!(resets.load(Ordering::Relaxed), 2);
+    }
 }

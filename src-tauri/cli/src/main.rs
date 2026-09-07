@@ -179,16 +179,13 @@ fn print_human_readable(r: &AnalysisResult) {
         println!("  Bit depth check:   declared {declared}-bit{note}");
     }
     let sr = &r.sample_rate_analysis;
-    if sr.likely_upsampled {
+    if sr.bandwidth_limited {
         println!(
-            "  Sample rate check: ⚠ declared {} Hz but content stops at {:.1} kHz ({:.0}% of \
-             available bandwidth) — consistent with upsampling{}",
+            "  Bandwidth check:   declared {} Hz, measured limit {:.1} kHz ({:.0}% of \\
+             available bandwidth); filtering and upsampling cannot be distinguished",
             sr.declared_sample_rate_hz,
             sr.content_bandwidth_hz.unwrap_or_default() / 1000.0,
             sr.bandwidth_ratio.unwrap_or_default() * 100.0,
-            sr.sufficient_sample_rate_hz
-                .map(|rate| format!("; {rate} Hz would carry this losslessly"))
-                .unwrap_or_default()
         );
     }
     println!(

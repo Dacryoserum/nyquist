@@ -20,11 +20,10 @@ file.
 
 ## Why "Nyquist"
 
-Named after the Nyquist frequency — the theoretical ceiling of a sampled signal's usable
-bandwidth, and the direct reason a fake-lossless file leaves a fingerprint: a real
-192kHz/24-bit master has meaningful content well past 16-20kHz, while a lossy transcode
-often shows an abrupt spectral cutoff right around where the original lossy encoder cut
-it off.
+Named after the Nyquist frequency — half the sample rate, the theoretical upper frequency
+limit of an unaliased sampled signal. A spectral cutoff can reveal filtering, but not its
+cause: legitimate high-rate masters can be band-limited, and processed transcodes can carry
+ultrasonic noise. Neither observation alone establishes a file's history.
 
 ## What it does today
 
@@ -44,40 +43,48 @@ it off.
 - Detects bit-depth padding — a file zero-padded into a wider container without ever
   containing more real information (a "fake hi-res" pattern distinct from lossy
   transcoding).
-- Detects sample-rate padding — a file resampled up to 96/192 kHz whose content stops well
-  below the bandwidth that rate exists to carry. The counterpart to bit-depth padding, and
-  likewise reported separately from the transcode verdict: such a file is lossless end to
-  end, so calling it "transcoded" would name the wrong defect.
+- Reports limited measured bandwidth in high-rate files, without claiming that the file
+  was upsampled or recommending a supposedly lossless downsampling rate. Native filtering
+  and resampling can produce indistinguishable edges.
+- Searches for AAC long-block frame grids with both sine and Kaiser–Bessel windows. A
+  candidate must be confirmed on disjoint frames; the window and both scores are displayed.
 - Reports an incomplete decode — skipped packets, or a stream that stopped early — and
   **withholds the transcode verdict** when one happens, so a corrupt file is never quietly
   judged as if it were whole.
-- Scores the likelihood of a lossy-to-lossless transcode from the above, always reported as
+- Assesses evidence of a lossy-to-lossless transcode, always reported as
   a **4-state, explainable verdict** with a human-readable list of what produced it — never
   a flat yes/no, because natural treble-poor masters exist and false positives matter more
   than missed detections. The states are:
-  - **probably authentic** — positive evidence was measured that rules out a lossy source;
-  - **probably transcoded** — an encoder fingerprint was found;
-  - **inconclusive** — no sign of transcoding was found, which is *not* evidence of
-    authenticity. On a 44.1 kHz file with no detectable cutoff this is the expected and
-    honest answer, not a failure;
+  - **probably authentic** — reserved; no current test establishes this, so never emitted;
+  - **probably transcoded** — a codec-grid hypothesis was confirmed, not absolute proof;
+  - **inconclusive** — available evidence cannot establish provenance, including cases
+    with ambiguous spectral edges or encoder tags;
   - **lossy format** — the file is an MP3/AAC/Opus and says so, so the question of a
     disguise does not arise.
 
   Evidence is reported as a weak/moderate/strong reading rather than a percentage: the
-  underlying weights are tuned on a twenty-fixture corpus, not calibrated against a held-out
+  underlying weights are checked on a small synthetic corpus, not calibrated against a held-out
   validation set, and a percentage would claim a precision they do not have. The raw number
   is still in the exported JSON.
 - Exports the full analysis as a JSON report.
 - Ships a headless CLI (`nyquist-cli`) for scripting/batch use, sharing the exact same
   analysis pipeline as the desktop app.
 - UI in French by default, with a discreet toggle to switch to English.
+- Comparison keeps playback bound to the primary file. Request-scoped stage progress is
+  emitted while analysis runs off the event thread; obsolete results cannot replace playback.
+
+See [research, counterexamples and measured before/after results](docs/detection-research.md).
+The stricter evidence policy deliberately abstains on spectral-only MP3 cases: on the initial
+corpus, 3/10 lossy derivatives are identified and 7/10 remain inconclusive (formerly 8/10
+identified and 2/10 inconclusive). The added KBD AAC fixture is now detected; legitimate sharp
+filters no longer receive lossy verdicts. These are regression results, not general accuracy.
 
 ## Tech stack
 
 Tauri (Rust backend + Svelte frontend, native webview). Rust core: `symphonia` for
 decoding, `rustfft` for spectral analysis, `ebur128` for LUFS/LRA/true peak, `rayon` for
-running the independent analysis stages concurrently. Playback uses the webview's native
-`rodio` (over `cpal`) for playback, fed directly from the samples the analysis already
+running the independent analysis stages concurrently. Native playback uses
+`rodio` (over `cpal`), fed directly from the samples the analysis already
 decoded — the webview plays nothing at all. Two earlier attempts went through the webview's
 `<audio>` element, over Tauri's `asset://` protocol and then over a loopback HTTP server;
 both kept the element's own idea of how long the file was, which disagreed with the
@@ -132,21 +139,13 @@ for the detailed list.
 
 Ahead:
 - Remaining UI polish (session history).
-- Catching transparent **MP3** encodes (LAME V0), which do not lowpass at all and are
-  therefore invisible to the spectral method — the main known gap. Such a file comes out
-  *inconclusive*, never "probably authentic": the tool declines to vouch for what it cannot
-  see. The AAC half of this gap is closed, by the MDCT grid sweep in
-  `src-tauri/src/mdct_grid.rs`, which catches AAC 256 and AAC 128 across the corpus
-  including settings no spectral measurement can see. It cannot be extended to MP3, whose
-  hybrid filterbank a plain MDCT does not invert.
-
-  Two approaches have been implemented, measured and rejected against the corpus; both are
-  recorded with their numbers in `src-tauri/tests/fixtures/corpus/README.md` so the next
-  attempt starts from the results. The blocker turned out not to be the algorithm but the
-  corpus: it is built from noise, which is the material a perceptual encoder discards least,
-  so LAME V0 leaves no trace in it to detect. `tests/local_probe.rs` measures the statistics
-  a detector would need, against real music placed in the gitignored `corpus/local/`. That
-  measurement comes before any further implementation.
+- Codec-specific evidence for **MP3**, including LAME V0; the existing AAC grid test does
+  not invert MP3's hybrid filterbank. Spectral edges alone cannot justify an accusation.
+- Broader AAC coverage: short/window-switching blocks and post-processed audio can evade
+  the current long-block search. A negative result never rules out AAC.
+- Independent real-master validation, split by source before producing derivatives, and
+  calibrated abstention before shipping any codec-independent learned detector. See the
+  [research note](docs/detection-research.md) for published approaches and integration gates.
 - **V1.0** — Public macOS release (`.dmg`), notarization.
 - **V1.1+** — Windows. **V2.0+** — folder/library batch scanning (CLI already covers part
   of this), side-by-side file comparison, local history (SQLite).

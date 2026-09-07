@@ -7,6 +7,14 @@ constats durables uniquement, pas d'historique de session. Supprimer ce qui devi
 > RMS/peak/DR/LUFS/true peak, UI liste brute) — voir `git log` pour l'état réel du code,
 > ce fichier ne liste que les pièges durables.
 
+## Validation de provenance
+
+La recherche AAC couvre les fenêtres longues sinus et KBD ; les deux passes doivent dépasser
+le seuil, avec confirmation sur des échantillons distincts. Pas de preuve absolue, pas
+d'exclusion de l'AAC sur test négatif, pas de couverture MP3. Consulter
+`docs/detection-research.md` et le corpus `forensic/` avant de changer les hypothèses.
+Les dérivés d'une même source ne sont pas des exemples indépendants de validation.
+
 ## Symphonia 0.6.0 : API différente de la plupart des exemples trouvés en ligne
 
 La majorité des tutoriels/exemples Symphonia sur le web ciblent la 0.5.x. La 0.6.0 (celle
@@ -39,56 +47,26 @@ deviner depuis un exemple 0.5.x trouvé sur le web — les deux API ne sont pas 
 `loudness_global()` (nécessite `Mode::I`), `true_peak(channel: u32)` (nécessite
 `Mode::TRUE_PEAK`, qui implique déjà `SAMPLE_PEAK`). `loudness_global()` renvoie toujours
 `Ok`, y compris pour un signal silencieux (retourne alors une valeur non-finie) — filtrer
-sur `.is_finite()` avant de sérialiser en JSON (serde_json échoue sur NaN/Infinity).
+sur `.is_finite()` avant de sérialiser en JSON (ne pas confondre valeur non finie et mesure valide).
 
-## Perf : `npm run tauri dev` (profil debug) est trompeusement lent sur du DSP réel
+La disposition par défaut d'ebur128 ignore des canaux au-delà de la 5.1. Passer les positions
+Symphonia explicitement via `set_channel_map`, exclure LFE de la sonie mais jamais des crêtes.
+Une disposition multicanale inconnue doit laisser LUFS/LRA indisponibles. Le silence reste
+sans LRA mesurable, même au-delà du minimum de durée.
 
-Mesuré le 2026-07-23 sur un FLAC réel (6:52, 24-bit/44.1kHz, 18.2M échantillons/canal,
-`decode_file` + `analyze_signal`, `ebur128` en mode `I | TRUE_PEAK`) :
+## Mesures, progression et payload
 
-| Build | decode | analyse (RMS/peak/LUFS/true peak) | total |
-|---|---|---|---|
-| debug (`cargo build` / `tauri dev`) | 23.5s | 81.5s | ~105s |
-| release (`cargo build --release`) | 0.47s | 0.86s | 1.3s |
+Les profils dev du dépôt optimisent désormais aussi le DSP : les vieux rapports de lenteur
+en debug non optimisé ne décrivent plus le build courant. Rebenchmarker avec le CLI
+(`cargo run --release -p nyquist-cli -- --timing fichier.flac`) après une modification.
 
-~80x d'écart, valeurs identiques (LUFS/true peak inchangés au chiffre près) — donc pure
-lenteur du profil non optimisé (`ebur128` fait beaucoup de filtrage/interpolation
-polyphée par échantillon, ce que `-O0` ne vectorise pas), pas un bug ni une boucle
-infinie. **Ne pas interpréter un `analyze_file` qui prend >1 min sous `tauri dev` comme un
-hang** — c'est attendu sur un fichier long/haute résolution en debug ; comparer contre un
-`cargo build --release` avant de creuser plus loin. En production (`tauri build`, release
-par défaut), 1.3s pour ~7 minutes de FLAC 24-bit est largement sous le seuil qui
-justifierait des événements de progression pour cette étape — l'exigence AGENTS.md
-"progression dès le V0.1" reste vraie pour d'éventuels futurs traitements plus lourds
-(spectrogramme V0.2), pas retroactivement pour `analyze_file` tel qu'il existe aujourd'hui.
+Le spectrogramme reste limité à 600×300 octets u8 puis base64 (~240 ko), jamais une matrice
+dense JSON. Les puissances FFT sont moyennées entre canaux, pas les formes d'onde :
+L=-R doit conserver son spectre. Un plancher numérique commun ne prouve aucune énergie.
 
-## Spectrogramme : perf et taille de payload mesurées (résolu, plus un risque anticipé)
-
-Sur le même FLAC de référence (6:52, 24-bit/44.1kHz) en release : le calcul spectral
-(`spectral::analyze_spectrum`, FFT 4096 pts / hop 2048 / Hann window, downsamplé à 600×300
-avant quantification u8 + base64) ajoute **~315ms** au pipeline (total decode+signal+
-spectral ≈ 1.6s). Payload IPC : **~240KB** en base64 pour ce fichier. Aucun souci de
-perf ni de taille — la stratégie "downsampler + quantifier avant sérialisation" (voir
-skill `tauri-ipc-contract`) suffit largement, pas besoin de canal binaire dédié pour
-l'instant. Le spectral cutoff brut (`detect_cutoff`, seuil -40dB sous le pic) a été
-cross-validé contre des mesures ffmpeg indépendantes (`highpass`+`astats`) sur le corpus :
-bonne corrélation sur les coupures nettes (mp3_128 ≈ 16.8kHz mesuré vs ~16kHz ffmpeg,
-mp3_320 ≈ 20.2kHz vs ~20.5kHz), confirme correctement l'absence de coupure sur V0/AAC256.
-**Sur de la vraie musique (pas le bruit synthétique du corpus), ce cutoff brut peut tomber
-assez bas (~8kHz mesuré sur un morceau orchestral réel)** — c'est attendu (l'essentiel de
-l'énergie musicale réelle est dans le médium, pas un signe de transcodage) et une bonne
-illustration concrète de pourquoi ce chiffre reste explicitement labellisé "raw
-measurement, not a verdict" dans l'UI et ne doit jamais servir seul de base à un verdict
-en V0.3.
-
-**Mise à jour 2026-07-24** : pipeline complet (decode + signal + DR14 + spectral +
-transcode + bit-depth + tags) mesuré à **~2.4s en release** sur le même fichier de
-référence — DR14 (itère sur tous les blocs de 3s) et bit-depth (jusqu'à 16 passages
-complets sur tous les échantillons, cas défavorable) ajoutent chacun un coût réel mais
-individuellement modeste. Toujours sous le seuil qui justifierait de la progression ; à
-resurveiller si un futur ajout alourdit encore le pipeline (le CLI, `nyquist-cli`,
-partage exactement ce même pipeline via `analysis.rs` — pratique pour rebencher vite :
-`time nyquist-cli fichier.flac`).
+`analyze_file` émet `analysis-progress` avec `request_id` et un compte d'étapes, pas un
+pourcentage de durée. Les analyses complètes sont sérialisées ; seules les nouvelles
+requêtes principales remplacent le lecteur, jamais la comparaison.
 
 ## Les deux façons dont une mesure de pente spectrale ment (trouvées 2026-07-25, corrigées)
 
@@ -193,7 +171,7 @@ correction, dont ~737 Mo pour le seul `Vec<i64>` que `bit_depth.rs` matérialisa
 échantillons de tous les canaux. Remplacé par un histogramme de bits de poids faible en une
 passe (l'alignement sur une grille `2^k` équivaut à « au moins k zéros de poids faible », donc
 une passe répond pour tous les candidats à la fois) → **953 Mo**. Puis suppression du buffer
-mono pleine longueur (downmix fait fenêtre par fenêtre dans `spectral.rs`) → **845 Mo**, soit
+mono pleine longueur (remplacé depuis par une moyenne des puissances par canal) → **845 Mo**, soit
 **-51 % par rapport aux 1,73 Go d'origine**. `frames_db` est passé d'un `Vec<Vec<f32>>` (une
 allocation par trame, 22 500 sur ce fichier) à un seul buffer contigu — même volume, mais une
 allocation et une bien meilleure localité pour les balayages qui parcourent une bande à
@@ -216,12 +194,11 @@ cutoff que si la source avait réellement de l'énergie près de la fréquence d
 l'encodeur.** Sur du contenu calme/orchestral, un vrai transcodage peut être totalement
 indétectable par cette méthode — un faux négatif silencieux, pas un bug.
 
-A motivé l'ajout de `rolloff_steepness_db_per_khz` dans `spectral.rs` : la **pente** de la
-coupure (dB/kHz) sépare bien mieux "filtre d'encodeur" (raide, ~190-270 dB/kHz mesuré sur
-LAME réel) de "rolloff naturel" (doux, ~5-10 dB/kHz mesuré aussi bien en synthétique
-qu'en musique réelle, transcodée ou non). `transcode_detect.rs` utilise la pente comme
-signal principal ; la position ne sert qu'à décrire *où* se situe une coupure déjà
-confirmée comme artificielle par sa pente — jamais comme preuve indépendante.
+Une pente raide ne résout pas l'ambiguïté : le corpus forensic contient un filtre FIR
+natif à 96 kHz et un ré-échantillonnage sans perte avec des pentes supérieures à 40 dB/kHz.
+Le spectre et les tags ne déclenchent plus de verdict à eux seuls. De même, du bruit ajouté
+après MP3 peut remplir les ultrasons : aucun verdict « probablement authentique » n'est
+actuellement émis. Une bande limitée n'établit pas la fréquence d'origine.
 
 **Piège de calcul rencontré et corrigé** : la première version de `measure_rolloff_steepness`
 retournait une valeur élevée (350 dB/kHz, "très raide") pour les fichiers **sans aucune
@@ -366,4 +343,3 @@ pour les early adopters en attendant. Voir la skill `release-packaging`.
   par `.app` entre en conflit avec l'extension de bundle macOS. Corrigé avant toute release,
   donc sans dette — mais ne pas le re-changer après la première release publique, c'est
   l'identité de l'app pour macOS (préférences, permissions, mises à jour).
-

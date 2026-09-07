@@ -1,6 +1,6 @@
 {
   "name": "nyquist",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Desktop audio quality analyzer and lossy-to-lossless transcode detector",
   "type": "module",
   "scripts": {
