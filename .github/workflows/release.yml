@@ -9,8 +9,8 @@ name: Release
 # release the chance to open both artifacts on a clean machine before anyone can download
 # them — the alternative was artifacts going live the moment the build finished.
 #
-# The full PR validation suite runs first (see the `validate` job): a release built from a
-# commit that would not pass CI is not a release anyone should be handed.
+# Packaging and the full PR validation suite run concurrently. Only the final draft job
+# can write releases, and it requires both to succeed.
 on:
   push:
     tags: ["v*"]
@@ -18,7 +18,11 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   # Cheap gate: fail in seconds rather than after two platform builds if the version fields
@@ -51,7 +55,7 @@ jobs:
     uses: ./.github/workflows/build.yml
 
   build:
-    needs: [version-check, validate]
+    needs: [version-check]
     name: ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -69,6 +73,7 @@ jobs:
             # `--bundles dmg` keeps the release to a single macOS download. Without it
             # Tauri also emits a bare .app archive, which is the same application twice.
             args: --target universal-apple-darwin --bundles dmg
+            artifact-path: src-tauri/target/universal-apple-darwin/release/bundle/dmg/*.dmg
           - os: windows-latest
             label: Windows (x64)
             rust-targets: ""
@@ -76,6 +81,7 @@ jobs:
             # installer .exe; the default would also produce an .msi, which installs the
             # very same application and only makes the download page ambiguous.
             args: --bundles nsis
+            artifact-path: src-tauri/target/release/bundle/nsis/*.exe
 
     steps:
       - uses: actions/checkout@v4
@@ -110,40 +116,64 @@ jobs:
         with:
           workspaces: src-tauri
           prefix-key: release
+          shared-key: packaging-${{ runner.os }}-${{ runner.arch }}
+          # A manual run on main warms a cache later tags can restore. Tag-scoped
+          # caches cannot be shared with the next tag, so do not upload them.
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       # tauri-action uploads everything it finds under bundle/, so a stale artifact
       # restored from cache ends up attached to the release. A v0.1.0 built with
       # `--bundles nsis` shipped an .msi from the previous run this way.
       - name: Remove stale bundles
-        shell: bash
-        run: rm -rf src-tauri/target/*/release/bundle src-tauri/target/release/bundle
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue src-tauri/target/universal-apple-darwin/release/bundle
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue src-tauri/target/aarch64-apple-darwin/release/bundle
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue src-tauri/target/x86_64-apple-darwin/release/bundle
+          Remove-Item -Recurse -Force -ErrorAction SilentlyContinue src-tauri/target/release/bundle
 
+      # No release token or tag here: these jobs can only build workflow artifacts.
       - uses: tauri-apps/tauri-action@v0
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: ${{ matrix.args }}
-          tagName: ${{ github.ref_name }}
-          releaseName: Nyquist ${{ github.ref_name }}
-          # Stated on the release itself rather than left for users to discover. Neither
-          # platform's binary is code-signed: macOS notarization needs a paid Apple Developer
-          # account and Windows needs a purchased code-signing certificate. Both decisions are
-          # deliberately still open (see .claude/CONTEXT.md), so until they are made the
-          # workarounds have to be documented where people download the files.
-          releaseBody: |
-            See `CHANGELOG.md` for what changed.
 
-            **These builds are not code-signed.**
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ runner.os }}
+          path: ${{ matrix.artifact-path }}
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
-            - **macOS** — Gatekeeper will refuse the app on first launch, reporting an
-              unidentified developer. Right-click (or Control-click) Nyquist.app and choose
-              **Open**, then confirm. Once per install. The `.dmg` is a universal binary and
-              runs natively on both Apple Silicon and Intel Macs.
-            - **Windows** — SmartScreen will show "Windows protected your PC". Click **More
-              info** → **Run anyway**, then the installer runs normally.
-
-            Nothing you analyze leaves your machine — the app does no network I/O.
-          # Draft, so the artifacts can be opened on a clean machine before anyone can
-          # download them — see the note at the top of this file.
-          releaseDraft: true
-          prerelease: false
+  draft:
+    name: Draft release (validated installers)
+    needs: [version-check, validate, build]
+    # A manual run on a branch tests packaging and warms caches, never creates a tag
+    # named "main" or accidentally publishes a new version.
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          path: installers
+          merge-multiple: true
+      - name: Create or refresh the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          # Both platforms must be present; never offer a partially built release.
+          test "$(find installers -maxdepth 1 -name '*.dmg' | wc -l)" -eq 1
+          test "$(find installers -maxdepth 1 -name '*.exe' | wc -l)" -eq 1
+          if draft=$(gh release view "$RELEASE_TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            test "$draft" = true || { echo "::error::Refusing to replace a published release"; exit 1; }
+            gh release upload "$RELEASE_TAG" installers/* --clobber
+          else
+            gh release create "$RELEASE_TAG" installers/* --verify-tag --draft \
+              --title "Nyquist $RELEASE_TAG" --notes-file .github/release-notes.md
+          fi
