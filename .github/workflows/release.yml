@@ -21,7 +21,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  # The reusable validation workflow has its own group based on github.workflow.
+  # Keep this caller distinct so it cannot wait on a concurrency slot it holds.
+  group: release-pipeline-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
