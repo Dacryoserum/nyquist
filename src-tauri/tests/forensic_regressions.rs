@@ -189,3 +189,25 @@ fn every_completed_stage_is_reported_without_changing_the_analysis() {
         serde_json::to_value(analyze(&path).unwrap()).unwrap()
     );
 }
+
+/// A FLAC cut short of the frame count its own header declares used to be refused outright
+/// with a demux error — a whole album in the maintainer's library was unreadable that way.
+/// It is a partial file, not an unreadable one: measurements are reported and every verdict
+/// is withheld, including the authentic one.
+#[test]
+fn a_truncated_flac_is_a_partial_decode_not_an_error() {
+    let whole = std::fs::read(fixture("authentic_dynamic_stereo_44k.flac")).unwrap();
+    let path = std::env::temp_dir().join(format!("nyquist-truncated-{}.flac", std::process::id()));
+    std::fs::write(&path, &whole[..whole.len() - 40_000]).unwrap();
+    let result = analyze(&path);
+    std::fs::remove_file(&path).ok();
+    let result = result.expect("a truncated FLAC must still be analyzed");
+    assert!(!result.decode_status.complete);
+    assert_eq!(result.transcode_assessment.verdict, Verdict::Indeterminate);
+    let json = serde_json::to_value(&result.transcode_assessment).unwrap();
+    assert!(!json["indicators"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|i| i["code"] == "no_codec_grid_found"));
+}

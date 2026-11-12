@@ -153,6 +153,19 @@ pub fn decode_file(path: &Path) -> Result<DecodedAudio, String> {
                 stopped_early = true;
                 break;
             }
+            // Some FLAC files (no frame-size bounds in STREAMINFO, typically written by a
+            // streaming encoder) make the demuxer run off the end instead of reporting a
+            // clean end of stream. Whether that is the real end is checkable: the header
+            // declares the frame count. Every declared frame decoded means the file is
+            // whole; anything else is a truncated file, kept as an explicitly partial
+            // decode rather than refused outright.
+            Err(SymphoniaError::IoError(e))
+                if e.kind() == std::io::ErrorKind::UnexpectedEof && !channel_samples.is_empty() =>
+            {
+                let decoded_frames = channel_samples[0].len() as u64;
+                stopped_early = track.num_frames != Some(decoded_frames);
+                break;
+            }
             Err(e) => return Err(format!("demux error: {e}")),
         };
 
