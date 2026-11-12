@@ -151,6 +151,7 @@ fn report_statistics_for_local_files() {
             decoded.sample_rate as f64 / 2.0,
             &decoded.encoder_tag_matches,
             &grid,
+            &nyquist_lib::mp3_grid::analyze_mp3_grid(&decoded),
             &decoded.codec_short_name,
             &decoded.decode_status,
         );

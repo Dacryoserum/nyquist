@@ -7,6 +7,8 @@ pub mod decode;
 pub mod dynamic_range;
 pub mod mdct_grid;
 pub mod metadata;
+pub mod mp3_grid;
+mod mp3_window;
 pub mod player;
 pub mod sample_rate;
 pub mod signal_analysis;

@@ -11,13 +11,16 @@
 //!
 //! Background: Kim & Rafii, "Lossy Audio Compression Identification", EUSIPCO 2018,
 //! https://eurasip.org/Proceedings/Eusipco/Eusipco2018/papers/1570436395.pdf.
-//! Our near-zero-count statistic differs from their adjacent log-energy-difference method;
-//! the paper's accuracy is not this implementation's accuracy. See docs/detection-research.md.
+//! Our statistic differs from their adjacent log-energy-difference method: it counts
+//! coefficients far below the RMS of their own 32-coefficient neighbourhood, the footprint a
+//! quantizer leaves inside a band. The paper's accuracy is not this implementation's
+//! accuracy. See docs/detection-research.md.
 //!
 //! Scope: one energetic channel, 1024-coefficient long blocks. Short blocks, window
 //! transitions, HE-AAC tools, resampling, added noise and edits can evade detection.
-//! MP3's hybrid filterbank is not inverted by this transform. Scores are descriptive robust
-//! deviations, not Gaussian tail probabilities; adding hypotheses requires new validation.
+//! MP3's hybrid filterbank is not inverted by this transform; `mp3_grid.rs` runs the same
+//! search through that filterbank. Scores are descriptive robust deviations, not Gaussian
+//! tail probabilities; adding hypotheses requires new validation.
 
 use rustfft::num_complex::Complex32;
 use rustfft::FftPlanner;
@@ -30,10 +33,12 @@ use crate::decode::DecodedAudio;
 /// AAC long-block MDCT size. Independent of sample rate — a frame is 1024 coefficients
 /// whether the file is 44.1 or 96 kHz.
 const AAC_MDCT_N: usize = 1024;
-/// A coefficient this far below its own frame's RMS counts as "the encoder zeroed it".
-/// Not a hard zero on purpose: writing a decoded stream back out as 16-bit lifts every true
-/// zero up to the dither floor, which is still far under this.
-const ZERO_THRESHOLD_DB: f32 = -70.0;
+/// A coefficient this far below the RMS of its own neighbourhood counts as "the encoder
+/// zeroed it". Not a hard zero on purpose: writing a decoded stream back out as 16-bit lifts
+/// every true zero up to the rounding floor.
+const ZERO_THRESHOLD_DB: f32 = -40.0;
+/// Coefficients per neighbourhood. The same test and the same figures as `mp3_grid.rs`.
+const BLOCK: usize = 32;
 /// Frames measured per candidate offset during the sweep. The alignment peak is extremely
 /// sharp — one sample either side of the right offset and it is gone — so the sweep only
 /// has to rank offsets, not measure them precisely.
@@ -44,9 +49,12 @@ const CONFIRM_FRAMES: usize = 48;
 /// silent lead-in is all zeros at *every* offset and would flatten the contrast the whole
 /// measurement depends on. The silence-padded corpus fixture is exactly this case.
 const SILENT_FRAME_DB: f32 = -60.0;
-/// Required in both passes. Fixed before the new counterexample tests; not a calibrated
-/// false-alarm probability, particularly when searching more than one window hypothesis.
-const GRID_DETECTION_Z: f64 = 20.0;
+/// Required in both passes. Not a calibrated false-alarm probability.
+///
+/// Measured on 14 commercial recordings, their 28 AAC round trips (AudioToolbox 256k,
+/// FFmpeg 192k) and their 70 MP3 round trips: no file without an AAC history exceeded 5 on
+/// the sweep, no AAC derivative fell under 14 on either pass. See docs/detection-research.md.
+pub const GRID_DETECTION_Z: f64 = 12.0;
 /// Minimum samples needed to sweep at all: enough for the offset range plus the confirming
 /// frames.
 const MIN_SAMPLES: usize = AAC_MDCT_N * (CONFIRM_FRAMES + 4);
@@ -122,19 +130,7 @@ impl MdctGridAnalysis {
 /// and averaging the channels back together refills exactly the coefficients the encoder
 /// zeroed. Measured on the corpus, the downmix destroys the peak completely.
 pub fn analyze_mdct_grid(decoded: &DecodedAudio) -> MdctGridAnalysis {
-    // The most energetic channel, not the first. Still one channel rather than a downmix,
-    // for the reason above — but a file whose first channel is silent (a mono source laid
-    // into one side, an intro that enters on the right) would otherwise be swept on nothing
-    // at all and report a clean result it never actually measured.
-    let Some(channel) = decoded
-        .channel_samples
-        .iter()
-        .filter(|c| !c.is_empty())
-        .max_by(|a, b| {
-            let energy = |c: &[f32]| c.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
-            energy(a).total_cmp(&energy(b))
-        })
-    else {
+    let Some(channel) = most_energetic_channel(decoded) else {
         return MdctGridAnalysis::not_analyzed();
     };
     if channel.len() < MIN_SAMPLES {
@@ -152,6 +148,20 @@ pub fn analyze_mdct_grid(decoded: &DecodedAudio) -> MdctGridAnalysis {
             })
         })
         .unwrap_or_else(MdctGridAnalysis::not_analyzed)
+}
+
+/// The most energetic channel, not the first. Still one channel rather than a downmix —
+/// but a file whose first channel is silent (a mono source laid into one side, an intro
+/// that enters on the right) would otherwise be swept on nothing at all and report a clean
+/// result it never actually measured.
+pub(crate) fn most_energetic_channel(decoded: &DecodedAudio) -> Option<&[f32]> {
+    let energy = |c: &[f32]| c.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+    decoded
+        .channel_samples
+        .iter()
+        .filter(|c| !c.is_empty())
+        .max_by(|a, b| energy(a).total_cmp(&energy(b)))
+        .map(Vec::as_slice)
 }
 
 fn search_window(channel: &[f32], window: MdctWindow) -> MdctGridAnalysis {
@@ -295,8 +305,14 @@ fn pick_loud_frame_starts(
     loud.into_iter().step_by(step).take(wanted).collect()
 }
 
-/// Fraction of coefficients sitting more than [`ZERO_THRESHOLD_DB`] below their frame's RMS,
-/// averaged over the sampled frames.
+/// Fraction of coefficients sitting more than [`ZERO_THRESHOLD_DB`] below the RMS of their
+/// own [`BLOCK`]-coefficient neighbourhood, averaged over the sampled frames.
+///
+/// Local rather than relative to the whole frame: a frame-wide threshold mostly counts
+/// "the treble is quiet", which music does without any encoder and which raises every
+/// offset alike. A quantizer leaves something more specific — inside one small band,
+/// coefficients are either gone or at least a step large. Measured on 28 AAC round trips of
+/// commercial recordings, the frame-wide form missed three; this form misses none.
 fn zero_fraction(
     channel: &[f32],
     starts: &[usize],
@@ -305,7 +321,7 @@ fn zero_fraction(
     coefficients: &mut [f32],
 ) -> f32 {
     let n = mdct.n;
-    let ratio = 10f32.powf(ZERO_THRESHOLD_DB / 20.0);
+    let ratio_squared = 10f32.powf(ZERO_THRESHOLD_DB / 10.0);
     let mut counted = 0usize;
     let mut zeros = 0usize;
 
@@ -315,17 +331,11 @@ fn zero_fraction(
             continue;
         }
         mdct.transform(&channel[from..from + 2 * n], coefficients);
-
-        let energy: f64 = coefficients.iter().map(|&c| (c as f64) * (c as f64)).sum();
-        if energy <= 0.0 {
-            continue;
+        for block in coefficients.as_chunks::<BLOCK>().0 {
+            let mean_square = block.iter().map(|&c| c * c).sum::<f32>() / BLOCK as f32;
+            let threshold = mean_square * ratio_squared;
+            zeros += block.iter().filter(|&&c| c * c < threshold).count();
         }
-        let rms = (energy / n as f64).sqrt() as f32;
-        let threshold = rms * ratio;
-        zeros += coefficients
-            .iter()
-            .filter(|&&c| c.abs() < threshold)
-            .count();
         counted += n;
     }
 
@@ -460,7 +470,7 @@ fn twiddles(n: usize) -> (Vec<Complex32>, Vec<Complex32>) {
 }
 
 /// Quantizes the sweep to one byte per offset, scaled against `peak`.
-fn encode_profile(zero_fractions: &[f32], peak: f32) -> String {
+pub(crate) fn encode_profile(zero_fractions: &[f32], peak: f32) -> String {
     use base64::Engine;
     let scale = if peak > 0.0 { 255.0 / peak } else { 0.0 };
     let bytes: Vec<u8> = zero_fractions
@@ -470,13 +480,13 @@ fn encode_profile(zero_fractions: &[f32], peak: f32) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
-fn median_of(values: &[f32]) -> f32 {
+pub(crate) fn median_of(values: &[f32]) -> f32 {
     let mut sorted = values.to_vec();
     sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
     sorted[sorted.len() / 2]
 }
 
-fn median_absolute_deviation(values: &[f32], median: f32) -> f32 {
+pub(crate) fn median_absolute_deviation(values: &[f32], median: f32) -> f32 {
     let deviations: Vec<f32> = values.iter().map(|&v| (v - median).abs()).collect();
     median_of(&deviations)
 }

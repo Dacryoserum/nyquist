@@ -11,11 +11,22 @@
    * cost, and none of them need to be individually interactive. */
   import { onMount } from "svelte";
   import { t } from "$lib/i18n.svelte";
-  import type { MdctGridAnalysis } from "$lib/api";
+  import type { MdctGridAnalysis, Mp3GridAnalysis } from "$lib/api";
 
   const T = $derived(t());
 
-  let { grid }: { grid: MdctGridAnalysis } = $props();
+  /** The same drawing serves both codec searches. `window` only exists on the AAC result,
+   * which is what tells the two apart: MP3's long-block window is fixed by the standard. */
+  let { grid }: { grid: MdctGridAnalysis | Mp3GridAnalysis } = $props();
+
+  const isAac = $derived("window" in grid);
+  const labels = $derived(isAac ? T.mdct : T.mp3);
+  const atOffset = $derived(
+    "window" in grid ? grid.zero_fraction_at_offset : grid.sparse_fraction_at_offset
+  );
+  const baseline = $derived(
+    "window" in grid ? grid.zero_fraction_baseline : grid.sparse_fraction_baseline
+  );
 
   let canvas = $state<HTMLCanvasElement | undefined>();
   let theme = $state<"light" | "dark">("dark");
@@ -85,11 +96,11 @@
 
 <div class="mdct">
   {#if !grid.analyzed}
-    <p class="unavailable">{T.mdct.notAnalyzed}</p>
+    <p class="unavailable">{labels.notAnalyzed}</p>
   {:else}
     <div class="head">
       <span class="status" class:detected={grid.grid_detected}>
-        {grid.grid_detected ? T.mdct.detected : T.mdct.clear}
+        {grid.grid_detected ? labels.detected : labels.clear}
       </span>
       {#if grid.grid_detected}
         <span class="detail">{T.mdct.offset} {grid.frame_offset}</span>
@@ -99,19 +110,19 @@
     <!-- No `role="img"`: a canvas already carries an image role implicitly, and Svelte
          rightly flags the explicit one. The figures below state the same result in text, so
          a screen reader gets the finding without the picture. -->
-    <canvas bind:this={canvas} aria-label={T.mdct.chartAria}></canvas>
+    <canvas bind:this={canvas} aria-label={labels.chartAria}></canvas>
     <div class="axis">
       <span>0</span>
-      <span>{T.mdct.axisOffset}</span>
-      <span>1024</span>
+      <span>{labels.axisOffset}</span>
+      <span>{isAac ? 1024 : 576}</span>
     </div>
 
     <dl class="figures">
       <div>
-        <dt>{T.mdct.zeroed}</dt>
+        <dt>{labels.zeroed}</dt>
         <dd>
-          {(grid.zero_fraction_at_offset * 100).toFixed(1)}%
-          <em>({(grid.zero_fraction_baseline * 100).toFixed(1)}% {T.mdct.baseline})</em>
+          {(atOffset * 100).toFixed(1)}%
+          <em>({(baseline * 100).toFixed(1)}% {T.mdct.baseline})</em>
         </dd>
       </div>
       <div>
@@ -122,13 +133,15 @@
         <dt>{T.mdct.confirmation}</dt>
         <dd>{grid.confirmed_z_score.toFixed(1)} σ</dd>
       </div>
-      <div>
-        <dt>{T.mdct.window}</dt>
-        <dd>{grid.window === "kaiser_bessel" ? "Kaiser–Bessel" : T.mdct.sineWindow}</dd>
-      </div>
+      {#if "window" in grid}
+        <div>
+          <dt>{T.mdct.window}</dt>
+          <dd>{grid.window === "kaiser_bessel" ? "Kaiser–Bessel" : T.mdct.sineWindow}</dd>
+        </div>
+      {/if}
     </dl>
 
-    <p class="note">{T.mdct.note}</p>
+    <p class="note">{labels.note}</p>
   {/if}
 </div>
 

@@ -644,7 +644,9 @@ import Meter from "$lib/components/Meter.svelte";
           {/if}
         </div>
         <ul class="evidence">
-          {#each ta.indicators as indicator (indicator.code)}
+          <!-- Keyed by position: two indicators can share a code (an inconclusive search
+               for each codec), and the list is rebuilt whole with every analysis anyway. -->
+          {#each ta.indicators as indicator, index (index)}
             <li>{T.indicator(indicator)}</li>
           {/each}
         </ul>
@@ -737,6 +739,11 @@ import Meter from "$lib/components/Meter.svelte";
       <section class="card">
         <h2 class="section-title">{T.mdct.title}</h2>
         <MdctGrid grid={result.mdct_grid} />
+      </section>
+
+      <section class="card">
+        <h2 class="section-title">{T.mp3.title}</h2>
+        <MdctGrid grid={result.mp3_grid} />
       </section>
 
       <div class="metric-columns">

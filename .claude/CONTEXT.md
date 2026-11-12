@@ -9,11 +9,20 @@ constats durables uniquement, pas d'historique de session. Supprimer ce qui devi
 
 ## Validation de provenance
 
-La recherche AAC couvre les fenêtres longues sinus et KBD ; les deux passes doivent dépasser
-le seuil, avec confirmation sur des échantillons distincts. Pas de preuve absolue, pas
-d'exclusion de l'AAC sur test négatif, pas de couverture MP3. Consulter
-`docs/detection-research.md` et le corpus `forensic/` avant de changer les hypothèses.
-Les dérivés d'une même source ne sont pas des exemples indépendants de validation.
+Deux recherches de grille (AAC dans `mdct_grid.rs`, MP3 dans `mp3_grid.rs`), même statistique
+locale, seuil 12 sur balayage **et** confirmation sur trames distinctes. Deux recherches
+propres à ≤ 48 kHz donnent « probablement authentique » ; consulter
+`docs/detection-research.md` avant de toucher un seuil. Pièges mesurés :
+
+- **La statistique doit être locale.** Compter les coefficients à -70 dB du RMS de la *trame*
+  mesure surtout « les aigus sont faibles » et noie le pic : LAME V0 sortait à z ≈ 4 sur de
+  la vraie musique, contre ≥ 27 avec un seuil relatif au voisinage (36 coefficients, -40 dB).
+- **Le corpus synthétique ne valide pas un détecteur MP3** (bruit = rien à supprimer). Valider
+  sur de vrais enregistrements : extraits → `lame`/`ffmpeg` → WAV → `nyquist-cli --json`.
+- **Le décalage gagnant est un contrôle** : tous les MP3 décodés par FFmpeg tombent sur 528,
+  tous les AAC AudioToolbox sur 960. Un pic qui n'y est pas mérite un doute.
+- Un ré-échantillonnage après décodage efface les deux grilles : ne jamais blanchir > 48 kHz.
+- Les dérivés d'une même source ne sont pas des exemples indépendants de validation.
 
 ## Symphonia 0.6.0 : API différente de la plupart des exemples trouvés en ligne
 

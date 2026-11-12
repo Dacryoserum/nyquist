@@ -28,42 +28,43 @@ binaire CLI (`nyquist-cli`) pour l'usage scripté/batch. UI dashboard (thème so
 cartes, icônes, canvas spectrogramme + dégradé inferno) — validée visuellement et
 fonctionnellement en conditions réelles par l'utilisateur.
 
-**Le scoring de transcodage refuse désormais de conclure sans preuve positive.** Une absence
-d'indice retourne `Indeterminate`, pas `ProbablyAuthentic` : ne rien trouver n'est pas trouver
-que tout va bien, et l'ancienne règle cautionnait activement les deux transcodages LAME V0 du
-corpus. `ProbablyAuthentic` exige maintenant du contenu réel dans le haut d'une bande hi-res
-(`spectral::above_cd_ceiling_db`), qu'aucun encodage à la fréquence du CD n'aurait pu y
-mettre — donc en pratique seuls les fichiers 88,2 kHz et plus peuvent l'atteindre. Sur un
-44,1 kHz sans coupure détectable, « indéterminé » est la bonne réponse et il ne faut pas
-essayer de la « corriger ».
+**Le verdict repose sur deux recherches structurelles, une par famille de codec.**
+`mdct_grid.rs` ré-analyse le signal sur la MDCT de l'AAC (1024 décalages, fenêtres sinus et
+KBD) ; `mp3_grid.rs` le repasse dans le banc de filtres hybride du MP3 (polyphase 32 bandes
+avec la fenêtre normative ISO 11172-3, MDCT 36 points par sous-bande, inversion de fréquence,
+papillons anti-repliement) aux 576 alignements de granule. Même statistique des deux côtés :
+la part de coefficients à plus de 40 dB sous le RMS de leur propre voisinage — l'empreinte
+d'un quantificateur, visible au seul alignement de l'encodeur. Seuil 12 sur le balayage
+**et** sur des trames de confirmation distinctes.
 
-Signal principal côté transcodé : pente de rolloff (voir `transcode_detect.rs`), confiance
-plafonnée (≤0.9 avec empreinte de tag corroborante, ≤0.8 spectral seul, ≤0.7 authentique).
-La confiance n'est **pas** une probabilité : l'UI et le CLI l'affichent en force d'indices
-(faible/modérée/forte), le nombre brut ne survit que dans le JSON. Cross-validé contre des
-mesures ffmpeg indépendantes et, ponctuellement hors corpus versionné, contre de vrais FLACs
-commerciaux retranscodés (a révélé que la *position* seule du cutoff est trompeuse sur de la
-musique réelle — voir `.claude/CONTEXT.md`). Rapport FP/FN sur le corpus
-(`tests/corpus_smoke.rs`) : **20 fixtures, 0 faux positif, 0 faux négatif inattendu, 2 échecs
-documentés (LAME V0), 0 fichier transcodé cautionné**.
+- Grille confirmée → `ProbablyTranscoded`. **LAME V0 n'est plus un point aveugle** : le test
+  lit la quantification, pas l'enveloppe spectrale.
+- Deux recherches propres (< 6), fréquence ≤ 48 kHz, pas de coupure franche inexpliquée, pas
+  de tag d'encodeur lossy, décodage complet → `ProbablyAuthentic` (force plafonnée à 0.7).
+  C'est un **négatif testé**, pas une absence d'indice : les mêmes recherches attrapent les
+  fichiers que l'ancienne règle cautionnait.
+- Sinon `Indeterminate`, avec la raison précise dans `indicators[]`.
 
-Un décodage incomplet (paquets sautés, `ResetRequired`) suspend le verdict : les mesures
-restent, le jugement est retiré (`decode::DecodeStatus`).
+Un spectre seul n'accuse ni ne blanchit jamais ; les tags ne peuvent que suspendre. La
+confiance n'est **pas** une probabilité : l'UI et le CLI l'affichent en force d'indices
+(faible/modérée/forte), le nombre brut ne survit que dans le JSON.
 
-**Le point aveugle est à moitié fermé.** `mdct_grid.rs` détecte la grille de quantification
-d'un encodeur AAC en ré-analysant le signal décodé au décalage de trame exact du codec (la
-MDCT est inversible par TDAC, donc on retrouve les coefficients annulés). Test structurel,
-indépendant de l'enveloppe spectrale : il voit les encodages transparents. Corpus : 12
-authentiques à z ≤ 4,7 contre 79/132/215 pour les trois AAC, tous à l'offset 960.
+Validation sur de la vraie musique (14 enregistrements commerciaux indépendants, 98 dérivés
+LAME V0/V2/128/192/320 et AAC 256/192) : **98/98 détectés, 0/13 sources accusées** — voir
+`docs/detection-research.md`. Chiffres de développement, pas un taux tenu hors échantillon.
+Corpus versionné (`tests/corpus_smoke.rs`) : **20 fixtures, 8/10 dérivés détectés, 2 échecs
+documentés laissés indéterminés, 0 faux positif, 0 transcodé cautionné**.
 
-⚠️ **Le MP3 reste ouvert, et ne peut pas être couvert de la même façon** — banc de filtres
-hybride (polyphase 32 bandes + MDCT 18 par bande), qu'aucune MDCT simple n'inverse. LAME V0
-sort donc toujours en « probablement authentique » : l'outil cautionne le faux. Comme le MP3
-est au moins aussi répandu que l'AAC comme source de faux lossless, l'essentiel du risque
-pratique subsiste. Trois autres pistes ont été prototypées et rejetées (trous spectraux —
-accuse un piano « in the box » plus fort qu'un vrai transcodage ; grille de trames en
-domaine temporel — aucun signal ; stéréo joint — aucune séparation). Mesures consignées dans
-`tests/fixtures/corpus/README.md` : les relire avant de retenter.
+⚠️ **Ce que `ProbablyAuthentic` ne couvre pas** : un fichier lossy ré-échantillonné ou
+retraité après décodage (la grille disparaît), un codec hors MP3/AAC (Opus, Vorbis — d'où la
+suspension sur coupure franche inexpliquée), et tout fichier au-delà de 48 kHz (jamais
+blanchi). Bruit blanc à 320 kbps : aucun coefficient supprimé, donc rien à trouver. Pistes
+rejetées avant d'en arriver là (trous spectraux, grille temporelle, stéréo joint, grille de
+sous-bandes en FFT) consignées dans `tests/fixtures/corpus/README.md`.
+
+Un décodage incomplet (paquets sautés, `ResetRequired`, FLAC tronqué par rapport à son
+en-tête) suspend le verdict : les mesures restent, le jugement est retiré
+(`decode::DecodeStatus`).
 
 **Le bit-depth padding ("faux hi-res") est un problème séparé, avec sa propre méthode** —
 alignement exact sur une grille de quantification plus grossière que la profondeur déclarée
@@ -105,6 +106,8 @@ nyquist/
 │   │   ├── bit_depth.rs        # ✅ Détection bit-depth padding ("faux hi-res")
 │   │   ├── spectral.rs         # ✅ FFT, spectrogramme downsamplé, cutoff + pente + dans le temps
 │   │   ├── mdct_grid.rs        # ✅ Grille de quantification MDCT d'un encodeur AAC (structurel)
+│   │   ├── mp3_grid.rs         # ✅ Grille de quantification MP3 via son banc de filtres hybride
+│   │   ├── mp3_window.rs       # ✅ Fenêtre polyphase normative (ISO/IEC 11172-3 Table B.3)
 │   │   ├── stereo.rs           # ✅ Corrélation L/R, side/mid global et par bande, dual-mono
 │   │   ├── transcode_detect.rs # ✅ Scoring 4 états, voir la skill dédiée + module docs
 │   │   ├── player.rs           # ✅ Lecture native (rodio) depuis les échantillons décodés
@@ -165,7 +168,8 @@ voir la skill `tauri-ipc-contract`) + `transcode_assessment` (verdict 4 états +
 (`message`, ce que voient le CLI et le JSON exporté) **et** son `code` + ses mesures brutes,
 pour que l'UI recompose la phrase en français — ajouter une variante à `IndicatorDetail`
 oblige à traduire dans `i18n.svelte.ts`, sinon `npm run check` échoue) +
-`encoder_tag_matches` + `bit_depth_analysis` + `stereo_analysis` (corrélation L/R, side/mid
+`encoder_tag_matches` + `mdct_grid` + `mp3_grid` (profil de balayage en base64, scores,
+décalage) + `bit_depth_analysis` + `stereo_analysis` (corrélation L/R, side/mid
 par bande, dual-mono exact — `null` si le fichier n'est pas exactement stéréo).
 Payload mesuré ~240KB pour un FLAC de 6:52, calcul total ~2.4s en release (voir CONTEXT.md).
 Deux autres commandes IPC : `authorize_playback(path)`, qui autorise le fichier **et renvoie

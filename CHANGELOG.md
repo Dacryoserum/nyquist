@@ -6,10 +6,39 @@ releases start shipping.
 
 ## [Non publié]
 
+## [0.7.0] - 2026-11-12
+
+### Ajouté
+
+- **Détection du MP3 par sa grille de quantification** (`mp3_grid.rs`). Le signal décodé est
+  repassé dans le banc de filtres du MP3 lui-même (32 sous-bandes polyphase, puis MDCT) aux
+  576 alignements possibles ; au bon alignement, la quantification de l'encodeur réapparaît.
+  Le test lit le quantificateur et non le spectre : **LAME V0, jusque-là invisible, est
+  détecté**. Nouvelle carte « Grille MP3 » dans l'interface, ligne dédiée dans le CLI.
+- **Le verdict « probablement authentique » existe à nouveau, et il est mérité** : il est
+  rendu quand les deux recherches de grille (MP3 et AAC) ont tourné et n'ont rien trouvé, à
+  une fréquence où ces codecs opèrent. Ce n'est pas une preuve absolue — un fichier
+  ré-échantillonné ou retraité après décodage peut passer — et l'interface le dit.
+- Quand le verdict reste indéterminé, la raison précise est donnée : coupure franche sans
+  grille derrière elle, fréquence hi-res hors de portée des recherches, score ambigu, tag
+  d'encodeur, fichier trop court.
+
+### Modifié
+
+- La recherche AAC utilise la même statistique locale que la recherche MP3 (coefficients
+  très en dessous de leur propre voisinage, plutôt que de la trame entière). Sur de vrais
+  enregistrements : 28 allers-retours AAC détectés sur 28, contre 25 auparavant.
+- Seuil de détection des deux grilles : 12, sur le balayage et sur la confirmation.
+- Contrat JSON : nouveau bloc `mp3_grid` ; l'indice `transparent_encode_unseen` disparaît,
+  remplacé par des indices précis (`no_codec_grid_found`, `unexplained_sharp_edge`,
+  `sample_rate_outside_codec_range`, `grid_inconclusive`, `grid_search_unavailable`,
+  `mp3_grid_aligned`, `mp3_grid_clear`).
+
 ### Corrigé
 
 - Un FLAC plus court que ce que son en-tête annonce n'est plus refusé avec une erreur de
   démultiplexage : il est analysé comme décodage partiel, verdict suspendu.
+- Deux indices portant le même code ne font plus planter la liste des indices dans l'UI.
 
 ## [0.6.0] - 2026-09-07
 

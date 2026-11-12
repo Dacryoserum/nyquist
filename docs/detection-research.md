@@ -1,7 +1,86 @@
 # Detecting a lossy history: evidence and limits
 
-Reviewed 2026-09-07. This note separates published research, Nyquist's implementation,
-and measurements on its own synthetic corpus. None is a guarantee of authenticity.
+Reviewed 2026-11-12. This note separates published research, Nyquist's implementation,
+and measurements on its own corpora. None is a guarantee of authenticity.
+
+## Current state (2026-11-12): two structural searches, and a tested negative
+
+The verdict rests on two searches of the same kind, one per codec family:
+
+- `mdct_grid.rs` re-analyzes the signal on AAC's long-block MDCT at all 1024 frame offsets.
+- `mp3_grid.rs` re-analyzes it through MP3's hybrid filterbank — the 32-band polyphase
+  stage with the normative 512-tap window (ISO/IEC 11172-3 Table B.3), the 36-point
+  sine-windowed MDCT per subband, frequency inversion and the alias-reduction butterflies —
+  at all 576 granule offsets.
+
+Both use one statistic: the share of coefficients more than 40 dB below the RMS of their
+own small neighbourhood (32 coefficients for AAC, 36 for MP3). A quantizer leaves exactly
+that inside a band — coefficients are either gone or at least one step large — and only at
+the encoder's own alignment. Both require the winning offset to exceed a robust deviation
+of 12 on the sweep and again on audio the sweep did not use.
+
+The earlier statistic (coefficients 70 dB below the *frame's* RMS) mostly counts "the treble
+is quiet", which raises every offset alike. On real music it missed 3 of 28 AAC round trips
+and gave MP3 scores as low as 3.9 on LAME V0; the local form misses none of either.
+
+### Validation on real recordings
+
+14 excerpts of 45 s, one per album, from 14 different commercial releases (orchestral
+scores, electronic, rap; 16/44.1, 24/44.1 and 24/48 sources, all brought to 16-bit 44.1 kHz).
+Each was encoded and decoded back to PCM seven ways. One source turned out to carry an AAC
+grid already (see below) and is counted with the lossy files for the AAC search.
+
+| Material | Files | AAC search, min(sweep, confirm) | MP3 search, min(sweep, confirm) |
+| --- | ---: | --- | --- |
+| Lossless sources | 13 | highest 2.1 (sweep ≤ 4.1) | highest 1.6 (sweep ≤ 3.7) |
+| LAME V0 | 14 | — | lowest 27.6 |
+| LAME V2 | 14 | — | lowest 41.9 |
+| LAME 320 CBR | 14 | — | lowest 16.6 |
+| LAME 192 CBR | 14 | — | lowest 53.2 |
+| LAME 128 CBR | 14 | — | lowest 59.5 |
+| AAC 256 (AudioToolbox) | 14 | lowest 14.9 | highest sweep 3.9 |
+| AAC 192 (FFmpeg native) | 14 | lowest 42.1 | highest sweep 3.6 |
+
+At a threshold of 12: 70/70 MP3 and 28/28 AAC derivatives detected, 0/13 lossless sources
+accused. Every MP3 derivative lands on the same granule offset (528, the decoder's delay
+modulo 576), which a spurious peak would not do. The MP3 scores of AAC files and the AAC
+scores of MP3 files stay at the lossless level (sweep ≤ 4.2): the searches do not
+cross-trigger. The one exception is informative: the 320 kbps MP3 made from the source that
+already carried an AAC grid still scores 15 on the AAC search, through a second encode.
+
+These are **development figures**: the thresholds were chosen after looking at them, the
+sources are few, one decoder (FFmpeg) produced every derivative, and no file was processed
+after decoding. They are not a held-out accuracy estimate.
+
+### What `probably_authentic` now means
+
+Both searches run, both come back under 6 (the highest any unencoded file reached was 5.6,
+over 400+ full tracks), and none of the following holds:
+
+- the sample rate is above 48 kHz — MP3 and AAC do not operate there, so a lossy source
+  must have been resampled, which moves it off the encoder's sample grid and erases what
+  both searches read (`mp3_with_added_noise_96k` and `transcoded_mp3_128_upsampled_96k`
+  both pass the grid searches clean, which is why no hi-res file is cleared);
+- a brick-wall edge (≥ 40 dB/kHz) with no grid behind it — the footprint a codec outside
+  these two families would leave (Opus, Vorbis, WMA), and also what a mastering filter
+  leaves, so it withholds the verdict without accusing;
+- a lossy-encoder tag, a failed checksum, a partial decode, or a file too short or too
+  quiet to search.
+
+This is a tested negative, which the previous `probably_authentic` (a clean spectrum) was
+not: the same searches catch the LAME V0 fixtures that the old rule vouched for. It is
+still not proof. A lossy file resampled (44.1 → 48 kHz), time-stretched, re-equalized or
+dithered heavily after decoding can pass, as can a codec these searches do not model, and
+short-block-only passages are not read. The evidence strength is capped at "moderate".
+
+### Known misses
+
+- `transcoded_mp3_320_44k` (white noise at 320 kbps CBR): the encoder has bits to spare on
+  stationary noise and removes no coefficient, so there is no sparsity to find (MP3 score
+  2.2). Left `indeterminate` by its 20.4 kHz brick wall. Real music at 320 kbps is caught
+  14/14, but this shows the search reads *removed* coefficients, not the quantizer's step
+  itself — a very high bitrate on dense material is its weak side.
+- Anything resampled after the lossy step.
 
 ## Published work
 
@@ -26,7 +105,10 @@ and measurements on its own synthetic corpus. None is a guarantee of authenticit
   reports 97% compressed/uncompressed accuracy in its experiment. Only the abstract was
   available for this review; that figure is not a Nyquist performance estimate.
 
-## Implemented: a broader, confirmed AAC hypothesis
+## 2026-09 revision: a broader, confirmed AAC hypothesis
+
+Historical: the statistic and threshold described here were replaced on 2026-11-12 (see
+the current state above); the window search and the confirmation pass are unchanged.
 
 `mdct_grid.rs` now tests sine and Kaiser–Bessel-derived long windows. It retains the existing
 near-zero coefficient statistic and the robust deviation threshold of 20. Both the initial
@@ -54,8 +136,9 @@ Conversely, ultrasonic noise added after an MP3 round-trip can pass the old posi
 authenticity test. Silence also reached that branch through equal numerical floors.
 
 Consequently, spectrum and tags remain visible observations but cannot independently
-produce a provenance verdict. `probably_authentic` is reserved and currently never emitted.
-Only confirmed codec-grid evidence can produce `probably_transcoded`. Damaged/incomplete
+produce a provenance verdict. Only confirmed codec-grid evidence can produce
+`probably_transcoded`, and only two clean codec-grid searches can produce
+`probably_authentic` (see the current state above). Damaged/incomplete
 decoding or a failed embedded checksum withholds that inference. Declared MP3/AAC files
 remain `declared_lossy`, not accused of disguising anything.
 
@@ -67,12 +150,13 @@ rate therefore cannot truthfully be described as a guaranteed lossless conversio
 
 Initial corpus: **20 files, 10 lossy derivatives and 10 lossless controls**.
 
-| Metric | Before (`0.5.0`) | Evidence revision |
-| --- | ---: | ---: |
-| Detected lossy derivatives | 8/10 | 3/10 |
-| Missed/abstained lossy derivatives | 2/10 | 7/10 |
-| Lossless files accused | 0/10 | 0/10 |
-| Lossy derivatives called authentic | 0/10 | 0/10 |
+| Metric | Before (`0.5.0`) | Evidence revision (`0.6.0`) | Two grid searches |
+| --- | ---: | ---: | ---: |
+| Detected lossy derivatives | 8/10 | 3/10 | 8/10 |
+| Missed/abstained lossy derivatives | 2/10 | 7/10 | 2/10 |
+| Lossless files accused | 0/10 | 0/10 | 0/10 |
+| Lossy derivatives called authentic | 0/10 | 0/10 | 0/10 |
+| Lossless files called authentic | — | 0/10 | 7/10 (the 3 others are 96 kHz) |
 
 Five MP3 verdicts based solely on spectral edges are deliberately withdrawn. This is a
 precision-oriented policy change, **not improved recall**. The three AAC detections remain

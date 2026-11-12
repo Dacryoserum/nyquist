@@ -14,6 +14,7 @@ use crate::decode::{self, DecodeStatus};
 use crate::dynamic_range::{self, DynamicRangeResult};
 use crate::mdct_grid::{self, MdctGridAnalysis};
 use crate::metadata::{self, FileInfo};
+use crate::mp3_grid::{self, Mp3GridAnalysis};
 use crate::sample_rate::{self, SampleRateAnalysis};
 use crate::signal_analysis::{self, SignalAnalysis};
 use crate::spectral::{self, SpectralAnalysis};
@@ -54,6 +55,9 @@ pub struct AnalysisResult {
     /// AAC encoder frame-grid alignment. Unlike the stereo image, this one *does* feed the
     /// verdict — see mdct_grid.rs.
     pub mdct_grid: MdctGridAnalysis,
+    /// MP3 granule-grid alignment, through the encoder's own hybrid filterbank. Feeds the
+    /// verdict alongside `mdct_grid` — see mp3_grid.rs.
+    pub mp3_grid: Mp3GridAnalysis,
 }
 
 /// Wall-clock cost of each pipeline stage. Deliberately **not** part of
@@ -69,6 +73,7 @@ pub struct StageTimings {
     pub bit_depth: Duration,
     pub stereo: Duration,
     pub mdct_grid: Duration,
+    pub mp3_grid: Duration,
     pub total: Duration,
 }
 
@@ -93,7 +98,7 @@ pub fn analyze_with_audio(path: &Path) -> Result<(AnalysisResult, decode::Decode
 }
 
 /// Number of completed stages emitted by [`analyze_with_progress`].
-pub const PROGRESS_STAGE_COUNT: usize = 7;
+pub const PROGRESS_STAGE_COUNT: usize = 8;
 
 /// Retains playback samples and reports each completed stage. The callback can run on
 /// concurrent Rayon workers and must not block or assume a fixed stage completion order.
@@ -169,10 +174,20 @@ fn analyze_full(
                                     (out, stage.elapsed())
                                 },
                                 || {
-                                    let stage = Instant::now();
-                                    let out = mdct_grid::analyze_mdct_grid(&decoded);
-                                    progress();
-                                    (out, stage.elapsed())
+                                    rayon::join(
+                                        || {
+                                            let stage = Instant::now();
+                                            let out = mdct_grid::analyze_mdct_grid(&decoded);
+                                            progress();
+                                            (out, stage.elapsed())
+                                        },
+                                        || {
+                                            let stage = Instant::now();
+                                            let out = mp3_grid::analyze_mp3_grid(&decoded);
+                                            progress();
+                                            (out, stage.elapsed())
+                                        },
+                                    )
                                 },
                             )
                         },
@@ -187,7 +202,7 @@ fn analyze_full(
     let (spectral_analysis, spectral_elapsed) = spectral_analysis;
     let (
         (bit_depth_analysis, bit_depth_elapsed),
-        ((stereo_analysis, stereo_elapsed), (mdct_grid, mdct_elapsed)),
+        ((stereo_analysis, stereo_elapsed), ((mdct_grid, mdct_elapsed), (mp3_grid, mp3_elapsed))),
     ) = bit_depth_analysis;
 
     timings.signal = signal_elapsed;
@@ -196,6 +211,7 @@ fn analyze_full(
     timings.bit_depth = bit_depth_elapsed;
     timings.stereo = stereo_elapsed;
     timings.mdct_grid = mdct_elapsed;
+    timings.mp3_grid = mp3_elapsed;
 
     let signal_analysis = signal_analysis?;
     let spectral_analysis = spectral_analysis?;
@@ -204,6 +220,7 @@ fn analyze_full(
         file_info.nyquist_hz as f64,
         &decoded.encoder_tag_matches,
         &mdct_grid,
+        &mp3_grid,
         &decoded.codec_short_name,
         &decoded.decode_status,
     );
@@ -231,6 +248,7 @@ fn analyze_full(
             sample_rate_analysis,
             stereo_analysis,
             mdct_grid,
+            mp3_grid,
         },
         timings,
         decoded,

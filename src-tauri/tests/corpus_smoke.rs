@@ -13,6 +13,7 @@ use nyquist_lib::bit_depth::analyze_bit_depth;
 use nyquist_lib::decode::decode_file;
 use nyquist_lib::mdct_grid::analyze_mdct_grid;
 use nyquist_lib::metadata::build_file_info;
+use nyquist_lib::mp3_grid::analyze_mp3_grid;
 use nyquist_lib::sample_rate::analyze_sample_rate;
 use nyquist_lib::signal_analysis::analyze_signal;
 use nyquist_lib::spectral::analyze_spectrum;
@@ -38,8 +39,8 @@ struct Fixture {
     expected_duration_seconds: f64,
     /// Ground truth per corpus/README.md — is this file actually a lossy transcode?
     is_actually_transcoded: bool,
-    /// Explicit abstention on MP3: a spectral edge is ambiguous, and this detector only
-    /// confirms AAC grids. Still counted as a missed transcode, never hidden as a success.
+    /// A transcode the detector is known not to catch, and must then leave `Indeterminate`:
+    /// counted as a miss, never hidden as a success, and never called authentic.
     expected_abstention: bool,
 }
 
@@ -81,8 +82,10 @@ const FIXTURES: &[Fixture] = &[
         filename: "transcoded_mp3_320_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
-        // LAME 320's wall is narrow enough that the wide bandwidth probe steps over it;
-        // steepness reports it, but cannot distinguish it from a mastering filter.
+        // Known miss. White noise at 320 kbps is quantized so finely that no coefficient is
+        // removed, so the grid search has nothing to find (real music at 320 is caught:
+        // 14/14 on the validation set). Its 20.4 kHz brick wall has no grid behind it, which
+        // is exactly what withholds the authentic verdict.
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
@@ -95,19 +98,19 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: Some((16_500.0, 17_500.0)),
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
-        expected_abstention: true,
+        expected_abstention: false,
     },
     Fixture {
-        // LAME V0 doesn't lowpass — indistinguishable from authentic by cutoff frequency
-        // alone. Asserting that on purpose: proves this detector can't catch this case,
-        // consistent with corpus/README.md's documented "hard" classification.
+        // LAME V0 doesn't lowpass — indistinguishable from authentic by its spectrum. This
+        // was the project's documented blind spot until `mp3_grid` read the quantizer
+        // directly: caught at z > 200.
         filename: "transcoded_mp3_v0_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 5.0,
         is_actually_transcoded: true,
-        expected_abstention: true,
+        expected_abstention: false,
     },
     Fixture {
         filename: "transcoded_aac_256_44k.flac",
@@ -168,7 +171,7 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: Some((16_500.0, 17_500.0)),
         expected_duration_seconds: 11.0,
         is_actually_transcoded: true,
-        expected_abstention: true,
+        expected_abstention: false,
     },
     Fixture {
         // Lossless throughout, so NOT a transcode — the deception here is the sample rate,
@@ -185,7 +188,8 @@ const FIXTURES: &[Fixture] = &[
     },
     Fixture {
         // Both defects at once: lossy source, then upsampled so the encoder cutoff no
-        // longer sits anywhere near the declared Nyquist.
+        // longer sits anywhere near the declared Nyquist. Known miss: resampling moves the
+        // audio off the encoder's sample grid, and no hi-res file is cleared for that reason.
         filename: "transcoded_mp3_128_upsampled_96k.flac",
         expected_sample_rate: 96_000,
         expected_channels: 2,
@@ -219,19 +223,18 @@ const FIXTURES: &[Fixture] = &[
         expected_cutoff_range_hz: Some((16_400.0, 17_400.0)),
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
-        expected_abstention: true,
+        expected_abstention: false,
     },
     Fixture {
-        // The documented blind spot, reproduced on realistic material: no lowpass at all,
-        // so this reads "probably authentic" at 60% — the tool actively vouching for a
-        // transcode rather than merely failing to catch it.
+        // The former blind spot on realistic material: no lowpass at all. Caught by the
+        // MP3 grid search.
         filename: "transcoded_dynamic_mp3_v0_44k.flac",
         expected_sample_rate: 44_100,
         expected_channels: 2,
         expected_cutoff_range_hz: None,
         expected_duration_seconds: 10.0,
         is_actually_transcoded: true,
-        expected_abstention: true,
+        expected_abstention: false,
     },
     Fixture {
         // Same, for Apple's AAC at 256 kbps.
@@ -403,6 +406,7 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
             file_info.nyquist_hz as f64,
             &decoded.encoder_tag_matches,
             &grid,
+            &analyze_mp3_grid(&decoded),
             &decoded.codec_short_name,
             &decoded.decode_status,
         );
@@ -416,10 +420,13 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
             fx.filename
         );
 
-        let expected_verdict = if fx.is_actually_transcoded && !fx.expected_abstention {
-            Verdict::ProbablyTranscoded
-        } else {
-            Verdict::Indeterminate
+        // Lossless fixtures are cleared only at rates MP3 and AAC operate at: above 48 kHz
+        // a clean grid search is not a tested negative, and the verdict stays withheld.
+        let expected_verdict = match (fx.is_actually_transcoded, fx.expected_abstention) {
+            (true, false) => Verdict::ProbablyTranscoded,
+            (true, true) => Verdict::Indeterminate,
+            (false, _) if fx.expected_sample_rate <= 48_000 => Verdict::ProbablyAuthentic,
+            (false, _) => Verdict::Indeterminate,
         };
         assert_eq!(
             assessment.verdict, expected_verdict,
@@ -453,7 +460,8 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
     // The line the tool must never cross, and the one it used to: an actual transcode coming
     // back "probably authentic". Both LAME V0 fixtures did, at 0.65, because a clean spectral
     // sweep was treated as evidence of authenticity rather than as an absence of evidence.
-    // They now read `Indeterminate` — still a miss, but an honest one.
+    // "Probably authentic" now requires two clean codec-grid searches, and those same
+    // searches catch both V0 fixtures.
     assert!(
         vouched_for_fakes.is_empty(),
         "the tool vouched for known transcodes: {vouched_for_fakes:?}"
@@ -467,20 +475,20 @@ fn every_corpus_fixture_decodes_and_analyzes_cleanly() {
         false_positives.is_empty(),
         "false positives on authentic fixtures: {false_positives:?}"
     );
-    // Regression detection remains strict: the three AAC fixtures must still be caught.
-    // Seven MP3 abstentions are counted explicitly after withdrawing spectral-only claims.
+    // Regression detection remains strict: three AAC and five MP3 fixtures must be caught.
+    // The two remaining misses are counted explicitly, and neither is called authentic.
     assert!(
         false_negatives.is_empty(),
         "unexpected false negatives: {false_negatives:?}"
     );
     assert_eq!(
         known_misses.len(),
-        7,
-        "all seven MP3 fixtures currently require abstention: {known_misses:?}"
+        2,
+        "exactly two documented misses (noise at 320 kbps, upsampled MP3): {known_misses:?}"
     );
     assert_eq!(
-        detections, 3,
-        "the three AAC fixtures must retain confirmed grid evidence"
+        detections, 8,
+        "three AAC and five MP3 fixtures must retain confirmed grid evidence"
     );
 }
 
@@ -558,6 +566,7 @@ fn a_pure_sine_is_never_reported_as_transcoded() {
         file_info.nyquist_hz as f64,
         &decoded.encoder_tag_matches,
         &grid,
+        &analyze_mp3_grid(&decoded),
         &decoded.codec_short_name,
         &decoded.decode_status,
     );
