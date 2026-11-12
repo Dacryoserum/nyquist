@@ -6,6 +6,11 @@ releases start shipping.
 
 ## [Non publié]
 
+### Corrigé
+
+- Un FLAC plus court que ce que son en-tête annonce n'est plus refusé avec une erreur de
+  démultiplexage : il est analysé comme décodage partiel, verdict suspendu.
+
 ## [0.6.0] - 2026-09-07
 
 ### Ajouté
