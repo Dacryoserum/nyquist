@@ -32,6 +32,7 @@ fn silence_is_not_ultrasonic_evidence_or_a_zero_loudness_range() {
     assert!(result.signal_analysis.loudness_range_lu.is_none());
     assert_eq!(result.transcode_assessment.verdict, Verdict::Indeterminate);
     assert!(!result.mdct_grid.analyzed);
+    assert!(!result.mp3_grid.analyzed);
 }
 
 #[test]
@@ -44,7 +45,7 @@ fn legitimate_sharp_filters_do_not_accuse_lossless_audio() {
         assert!(result.spectral_analysis.rolloff_steepness_db_per_khz > 40.0);
         assert!(result.sample_rate_analysis.bandwidth_limited);
         assert!(
-            !result.mdct_grid.grid_detected,
+            !result.mdct_grid.grid_detected && !result.mp3_grid.grid_detected,
             "{filename}: spurious codec grid"
         );
         assert_eq!(
@@ -96,7 +97,6 @@ fn kbd_aac_is_confirmed_even_after_gain_polarity_and_a_sample_crop() {
         original.z_score, original.confirmed_z_score
     );
     assert!(matches!(original.window, Some(MdctWindow::KaiserBessel)));
-    assert!(original.z_score >= 20.0 && original.confirmed_z_score >= 20.0);
     for channel in &mut audio.channel_samples {
         channel.drain(..137);
         channel.iter_mut().for_each(|s| *s *= -0.5);

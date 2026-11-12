@@ -170,7 +170,6 @@ export type IndicatorDetail =
   | { code: "invalid_sample_rate" }
   | { code: "sharp_rolloff"; steepness_db_per_khz: number; edge_khz: number }
   | { code: "no_encoder_lowpass"; scanned_from_khz: number; nyquist_khz: number }
-  | { code: "transparent_encode_unseen" }
   | { code: "gradual_rolloff"; cutoff_khz: number; steepness_db_per_khz: number }
   | {
       code: "mdct_grid_aligned";
@@ -182,6 +181,20 @@ export type IndicatorDetail =
       baseline_percent: number;
     }
   | { code: "mdct_grid_clear" }
+  | {
+      code: "mp3_grid_aligned";
+      z_score: number;
+      confirmed_z_score: number;
+      frame_offset: number;
+      sparse_percent: number;
+      baseline_percent: number;
+    }
+  | { code: "mp3_grid_clear" }
+  | { code: "grid_inconclusive"; codec: "aac" | "mp3"; z_score: number; confirmed_z_score: number }
+  | { code: "grid_search_unavailable" }
+  | { code: "no_codec_grid_found" }
+  | { code: "sample_rate_outside_codec_range"; sample_rate_khz: number }
+  | { code: "unexplained_sharp_edge"; edge_khz: number }
   | { code: "content_above_cd_ceiling"; level_db: number; ceiling_khz: number }
   | { code: "declared_lossy_codec"; codec: string }
   | { code: "decode_incomplete"; skipped_packets: number; stopped_early: boolean; channels_unequal: boolean };
@@ -235,8 +248,8 @@ export interface SampleRateAnalysis {
 /** The two long-block window hypotheses supported by the AAC search. */
 export type MdctWindow = "sine" | "kaiser_bessel";
 
-/** Confirmed AAC long-block grid evidence, not proof of origin. A negative search does
- * not exclude AAC; MP3's hybrid filterbank is outside this test's scope. */
+/** Confirmed AAC long-block grid evidence, not proof of origin. MP3 is searched separately
+ * by `Mp3GridAnalysis`, through its own filterbank. */
 export interface MdctGridAnalysis {
   window: MdctWindow | null;
   /** Robust deviation on disjoint confirmation frames; both passes must exceed threshold. */
@@ -256,6 +269,25 @@ export interface MdctGridAnalysis {
   sweep_profile_base64: string;
 }
 
+/** MP3 quantization-grid search through the encoder's own hybrid filterbank (polyphase +
+ * MDCT), swept over the 576 granule alignments. Sees presets with no lowpass (LAME V0). */
+export interface Mp3GridAnalysis {
+  /** false when the file was too short or too quiet to search. */
+  analyzed: boolean;
+  grid_detected: boolean;
+  /** Robust standard deviations above the file's own median offset. */
+  z_score: number;
+  /** The same score re-measured on audio the sweep did not use. */
+  confirmed_z_score: number;
+  /** Winning offset in samples, 0..576. */
+  frame_offset: number;
+  /** Share of coefficients quantized away at that offset, and at control offsets. */
+  sparse_fraction_at_offset: number;
+  sparse_fraction_baseline: number;
+  /** One byte per candidate offset (576), scaled against the strongest, base64-encoded. */
+  sweep_profile_base64: string;
+}
+
 export interface AnalysisResult {
   /** Which build of the pipeline produced these numbers. Thresholds and verdict logic move
    * between releases; an exported report is otherwise uninterpretable later. */
@@ -272,6 +304,7 @@ export interface AnalysisResult {
   /** null for anything that is not exactly two channels. */
   stereo_analysis: StereoAnalysis | null;
   mdct_grid: MdctGridAnalysis;
+  mp3_grid: Mp3GridAnalysis;
 }
 
 /** Request-scoped progress counts completed stages, not elapsed-time percentages. */

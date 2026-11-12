@@ -48,6 +48,9 @@ ultrasonic noise. Neither observation alone establishes a file's history.
   and resampling can produce indistinguishable edges.
 - Searches for AAC long-block frame grids with both sine and Kaiser–Bessel windows. A
   candidate must be confirmed on disjoint frames; the window and both scores are displayed.
+- Searches for MP3 quantization grids by running the decoded signal back through MP3's own
+  hybrid filterbank at all 576 granule alignments. This reads the quantizer rather than the
+  spectrum, so it also catches "transparent" presets with no treble cutoff (LAME V0).
 - Reports an incomplete decode — skipped packets, or a stream that stopped early — and
   **withholds the transcode verdict** when one happens, so a corrupt file is never quietly
   judged as if it were whole.
@@ -55,10 +58,13 @@ ultrasonic noise. Neither observation alone establishes a file's history.
   a **4-state, explainable verdict** with a human-readable list of what produced it — never
   a flat yes/no, because natural treble-poor masters exist and false positives matter more
   than missed detections. The states are:
-  - **probably authentic** — reserved; no current test establishes this, so never emitted;
+  - **probably authentic** — both codec-grid searches (MP3 and AAC) ran with full power and
+    found nothing, at a sample rate those codecs operate at. A tested negative, not proof:
+    audio resampled or processed after decoding, or from another codec, can pass;
   - **probably transcoded** — a codec-grid hypothesis was confirmed, not absolute proof;
-  - **inconclusive** — available evidence cannot establish provenance, including cases
-    with ambiguous spectral edges or encoder tags;
+  - **inconclusive** — no grid, but a stated reason prevents clearing the file: a
+    brick-wall edge with no grid behind it, a hi-res sample rate the searches cannot cover,
+    a borderline score, a lossy-encoder tag, a damaged or too-short file;
   - **lossy format** — the file is an MP3/AAC/Opus and says so, so the question of a
     disguise does not arise.
 

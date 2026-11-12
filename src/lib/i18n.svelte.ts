@@ -251,6 +251,17 @@ interface Dict {
     chartAria: string;
     note: string;
   };
+  /** The MP3 grid card. Shares its figure labels with `mdct`; only what differs is here. */
+  mp3: {
+    title: string;
+    detected: string;
+    clear: string;
+    notAnalyzed: string;
+    zeroed: string;
+    axisOffset: string;
+    chartAria: string;
+    note: string;
+  };
 }
 
 const fr: Dict = {
@@ -276,7 +287,7 @@ const fr: Dict = {
   verdict: {
     probablyAuthentic: {
       label: "Probablement authentique",
-      blurb: "Un élément positif a été mesuré, qui écarte une source avec perte à la fréquence du CD."
+      blurb: "Le signal a été ré-analysé sur les grilles de quantification du MP3 et de l'AAC : aucune des deux n'est présente. Ce n'est pas une preuve absolue — un fichier ré-échantillonné ou retraité après décodage peut passer."
     },
     probablyTranscoded: {
       label: "Probablement transcodé",
@@ -284,7 +295,7 @@ const fr: Dict = {
     },
     indeterminate: {
       label: "Indéterminé",
-      blurb: "Les indices disponibles ne permettent pas d'établir la provenance. Ce n'est ni une garantie d'authenticité, ni une accusation."
+      blurb: "Aucune grille d'encodeur confirmée, mais un point précis empêche de conclure à l'authenticité — il est indiqué ci-dessous. Ce n'est pas une accusation."
     },
     declaredLossy: {
       label: (codec) => `Format avec perte (${codecName(codec)})`,
@@ -304,7 +315,7 @@ const fr: Dict = {
             : ""
         }. Les tags stockés en fin de fichier (ID3v1, APEv2) ne sont pas lus : leur absence ne prouve donc rien dans un sens ni dans l'autre.`;
       case "tag_is_only_evidence":
-        return "Un tag peut être recopié, obsolète ou faux. Sans confirmation structurelle, il ne suffit pas à conclure à un transcodage.";
+        return "Ce tag n'est confirmé par aucune grille d'encodeur dans l'audio. Il ne suffit pas à conclure à un transcodage, mais tant qu'il est là le fichier n'est pas déclaré authentique.";
       case "insufficient_signal":
         return "Le signal est silencieux ou trop faible pour fournir des indices spectraux fiables. Aucun verdict d'authenticité ne peut en être tiré.";
       case "integrity_mismatch":
@@ -312,17 +323,29 @@ const fr: Dict = {
       case "invalid_sample_rate":
         return "Fréquence d'échantillonnage invalide ; impossible d'évaluer le contenu spectral.";
       case "sharp_rolloff":
-        return `Coupure franche (~${fmtNumber(i.steepness_db_per_khz, 0)} dB/kHz) autour de ${fmtNumber(i.edge_khz, 1)} kHz. Un encodeur, un filtre de mastering ou un ré-échantillonnage peuvent tous la produire : ce n'est pas une preuve de compression avec perte.`;
+        return `Coupure franche (~${fmtNumber(i.steepness_db_per_khz, 0)} dB/kHz) autour de ${fmtNumber(i.edge_khz, 1)} kHz. Un encodeur, un filtre de mastering ou un ré-échantillonnage peuvent tous la produire : à elle seule, elle n'accuse pas le fichier.`;
       case "no_encoder_lowpass":
-        return `Aucune coupure franche et soutenue mesurée entre ${fmtNumber(i.scanned_from_khz, 0)} et ${fmtNumber(i.nyquist_khz, 1)} kHz. L'absence de coupure ne prouve pas l'absence de compression avec perte.`;
-      case "transparent_encode_unseen":
-        return "Une compression avec perte peut ne laisser aucun indice détectable par ces tests, notamment après traitement du signal. L'absence de grille confirmée ne garantit pas une source sans perte.";
+        return `Aucune coupure franche et soutenue mesurée entre ${fmtNumber(i.scanned_from_khz, 0)} et ${fmtNumber(i.nyquist_khz, 1)} kHz. À elle seule cette absence ne prouve rien : ce sont les recherches de grille qui tranchent.`;
       case "gradual_rolloff":
         return `Le contenu s'arrête autour de ${fmtNumber(i.cutoff_khz, 1)} kHz, mais la transition y est progressive (~${fmtNumber(i.steepness_db_per_khz, 0)} dB/kHz) plutôt que le mur quasi vertical que produit un codec. C'est compatible avec un master volontairement sombre, un report de vinyle ou de bande, ou un encodage avec perte dont cette méthode ne peut pas distinguer le filtre — pas de quoi trancher dans un sens ou dans l'autre.`;
       case "mdct_grid_aligned":
         return `Alignement MDCT compatible avec des blocs longs AAC (fenêtre ${i.window === "kaiser_bessel" ? "Kaiser–Bessel" : "sinus"}, décalage ${i.frame_offset}). Écart robuste : ${fmtNumber(i.z_score, 0)} au balayage, ${fmtNumber(i.confirmed_z_score, 0)} sur des trames distinctes de confirmation ; ${fmtNumber(i.zero_percent, 1)} % de coefficients quasi nuls contre ${fmtNumber(i.baseline_percent, 1)} % aux décalages témoins. Indice structurel fort, pas une preuve absolue ni une probabilité calibrée.`;
       case "mdct_grid_clear":
-        return "Aucun alignement AAC confirmé pour les fenêtres et blocs longs testés. Cela n'exclut pas une source AAC : blocs courts, ré-échantillonnage, bruit ajouté ou transformations peuvent masquer la grille. Le MP3 n'est pas couvert par ce test.";
+        return "Pas de grille AAC : ré-analysé sur la transformée de l'AAC (blocs longs, fenêtres sinus et Kaiser–Bessel), aucun alignement de trame ne ressort.";
+      case "mp3_grid_aligned":
+        return `Grille de quantification MP3 trouvée au décalage ${i.frame_offset}, puis confirmée sur d'autres passages : écart robuste ${fmtNumber(i.z_score, 0)} au balayage, ${fmtNumber(i.confirmed_z_score, 0)} en confirmation. Ré-analysé à travers le banc de filtres du MP3, ${fmtNumber(i.sparse_percent, 1)} % des coefficients sont annulés par la quantification à cet alignement, contre ${fmtNumber(i.baseline_percent, 1)} % aux décalages témoins. C'est la trace d'un encodage MP3, y compris des réglages qui gardent toute la bande passante (LAME V0). Indice structurel fort, pas une probabilité.`;
+      case "mp3_grid_clear":
+        return "Pas de grille MP3 : ré-analysé à travers le banc de filtres hybride du MP3 aux 576 alignements possibles, aucun ne ressort.";
+      case "grid_inconclusive":
+        return `La recherche de grille ${i.codec === "aac" ? "AAC" : "MP3"} est ambiguë (écarts ${fmtNumber(i.z_score, 1)} et ${fmtNumber(i.confirmed_z_score, 1)}) : au-dessus de ce que produit un signal jamais encodé, en dessous d'une détection confirmée. Ni l'un ni l'autre verdict n'est fondé.`;
+      case "grid_search_unavailable":
+        return "Le fichier est trop court ou trop faible pour la recherche de grilles d'encodeur : aucun résultat testé n'est disponible.";
+      case "no_codec_grid_found":
+        return "Ni grille MP3 ni grille AAC. En validation, ces deux recherches ont retrouvé tous les allers-retours MP3 et AAC de vrais enregistrements, LAME V0 compris. Ce n'est pas une preuve : un fichier ré-échantillonné ou retraité après décodage, ou issu d'un autre codec, peut passer.";
+      case "sample_rate_outside_codec_range":
+        return `À ${fmtNumber(i.sample_rate_khz, 1)} kHz, les recherches de grille ne peuvent pas blanchir un fichier : le MP3 et l'AAC s'arrêtent à 48 kHz, donc une source avec perte aurait été ré-échantillonnée, ce qui efface la grille.`;
+      case "unexplained_sharp_edge":
+        return `La coupure franche vers ${fmtNumber(i.edge_khz, 1)} kHz n'a aucune grille MP3 ou AAC derrière elle. Un filtre de mastering ou de ré-échantillonnage l'explique, tout comme un codec que ces recherches ne couvrent pas (Opus, Vorbis, WMA). Le verdict « authentique » est suspendu.`;
       case "declared_lossy_codec":
         return `Ce fichier est en ${i.codec.toUpperCase()}, un format avec perte. Il ne se fait pas passer pour autre chose : il n'y a donc pas de transcodage à détecter, et la question à laquelle ce verdict répond — un conteneur sans perte cache-t-il de l'audio avec perte — ne s'applique pas. Toutes les mesures ci-dessous décrivent malgré tout le fichier fidèlement, y compris le passe-bas et la grille de trames de son propre encodeur.`;
       case "content_above_cd_ceiling":
@@ -518,7 +541,17 @@ const fr: Dict = {
     sineWindow: "Sinus",
     axisOffset: "décalage de trame (échantillons)",
     chartAria: "Profil du balayage de la grille MDCT",
-    note: "Chaque colonne est un décalage de trame possible ; sa hauteur, la part de coefficients MDCT annulés à ce décalage. Un pic isolé peut révéler une grille AAC. Les fenêtres sinus et Kaiser–Bessel sont testées, puis l'alignement doit se confirmer sur des trames distinctes. Ce test structurel complète le spectre ; son absence ne garantit pas une source sans perte. Le MP3 n'est pas couvert : son banc de filtres hybride n'est pas une MDCT simple."
+    note: "Chaque colonne est un décalage de trame possible ; sa hauteur, la part de coefficients MDCT annulés par rapport à leur voisinage à ce décalage. Un pic isolé révèle une grille AAC. Les fenêtres sinus et Kaiser–Bessel sont testées, puis l'alignement doit se confirmer sur des trames distinctes."
+  },
+  mp3: {
+    title: "Grille MP3",
+    detected: "Grille d'encodeur MP3 détectée",
+    clear: "Aucun alignement MP3",
+    notAnalyzed: "Fichier trop court ou trop faible pour chercher une grille MP3",
+    zeroed: "Coefficients annulés (confirmation)",
+    axisOffset: "décalage de granule (échantillons)",
+    chartAria: "Profil du balayage de la grille MP3",
+    note: "Le signal est repassé dans le banc de filtres du MP3 (32 sous-bandes puis MDCT) aux 576 alignements possibles. Au bon alignement, la quantification de l'encodeur réapparaît : un pic isolé. Ce test voit aussi les MP3 « transparents » sans coupure dans les aigus (LAME V0). Un ré-échantillonnage après décodage efface la grille."
   }
 };
 
@@ -545,7 +578,7 @@ const en: Dict = {
   verdict: {
     probablyAuthentic: {
       label: "Probably authentic",
-      blurb: "Positive evidence was measured that rules out a CD-rate lossy source."
+      blurb: "The signal was re-analyzed on the quantization grids of MP3 and AAC, and neither is present. Not absolute proof: a file resampled or processed after decoding can pass."
     },
     probablyTranscoded: {
       label: "Probably transcoded",
@@ -553,7 +586,7 @@ const en: Dict = {
     },
     indeterminate: {
       label: "Inconclusive",
-      blurb: "The available evidence cannot establish the source history. This is neither a guarantee of authenticity nor an accusation."
+      blurb: "No confirmed encoder grid, but one specific point prevents calling the file authentic. It is stated below. This is not an accusation."
     },
     declaredLossy: {
       label: (codec) => `Lossy format (${codecName(codec)})`,
@@ -737,7 +770,17 @@ const en: Dict = {
     sineWindow: "Sine",
     axisOffset: "frame offset (samples)",
     chartAria: "MDCT grid sweep profile",
-    note: "Each column is a candidate frame offset; its height is the share of MDCT coefficients reading as zeroed there. An isolated peak can reveal an AAC grid. Sine and Kaiser–Bessel windows are tested, then the offset must hold on disjoint confirmation frames. This structural test complements the spectrum; a negative search does not establish a lossless source. MP3 is not covered: its hybrid filterbank is not a plain MDCT."
+    note: "Each column is a candidate frame offset; its height is the share of MDCT coefficients reading as zeroed against their neighbourhood there. An isolated peak reveals an AAC grid. Sine and Kaiser–Bessel windows are tested, then the offset must hold on disjoint confirmation frames."
+  },
+  mp3: {
+    title: "MP3 grid",
+    detected: "MP3 encoder grid detected",
+    clear: "No MP3 alignment",
+    notAnalyzed: "Too short or too quiet to search for an MP3 grid",
+    zeroed: "Quantized away (confirmation)",
+    axisOffset: "granule offset (samples)",
+    chartAria: "MP3 grid sweep profile",
+    note: "The signal is run back through MP3's own filterbank (32 subbands, then an MDCT) at all 576 possible alignments. At the right one the encoder's quantization reappears as an isolated peak. This also sees \"transparent\" MP3s with no treble cutoff (LAME V0). Resampling after decoding erases the grid."
   }
 };
 

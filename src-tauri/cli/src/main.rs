@@ -38,13 +38,14 @@ fn main() -> ExitCode {
                     let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
                     eprintln!(
                         "{path}: decode {:.0}ms | signal {:.0}ms | DR14 {:.0}ms | spectral \
-                         {:.0}ms | bit-depth {:.0}ms | mdct {:.0}ms | total {:.0}ms",
+                         {:.0}ms | bit-depth {:.0}ms | mdct {:.0}ms | mp3 {:.0}ms | total {:.0}ms",
                         ms(timings.decode),
                         ms(timings.signal),
                         ms(timings.dynamic_range),
                         ms(timings.spectral),
                         ms(timings.bit_depth),
                         ms(timings.mdct_grid),
+                        ms(timings.mp3_grid),
                         ms(timings.total)
                     );
                 }
@@ -231,6 +232,21 @@ fn print_human_readable(r: &AnalysisResult) {
             grid.zero_fraction_baseline * 100.0,
             if grid.grid_detected {
                 " ⚠ AAC encoder grid"
+            } else {
+                ""
+            }
+        );
+    }
+    let mp3 = &r.mp3_grid;
+    if mp3.analyzed {
+        println!(
+            "  MP3 grid:          z={:.1} at offset {} (quantized away {:.1}% vs {:.1}% baseline){}",
+            mp3.z_score,
+            mp3.frame_offset,
+            mp3.sparse_fraction_at_offset * 100.0,
+            mp3.sparse_fraction_baseline * 100.0,
+            if mp3.grid_detected {
+                " ⚠ MP3 encoder grid"
             } else {
                 ""
             }

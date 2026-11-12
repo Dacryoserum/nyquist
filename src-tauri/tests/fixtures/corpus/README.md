@@ -1,12 +1,18 @@
 ## Current verdict policy
 
-The measurements and historical experiments below describe the original corpus. The current
-evidence revision deliberately abstains on all seven MP3 derivatives: five former detections
-relied solely on spectral edges that legitimate filters can reproduce. All three AAC fixtures
-remain detected. On these 20 files: 3/10 detected lossy derivatives, 7/10 abstentions, 0/10
-lossless files accused, and no lossy file called authentic. These are development regressions,
-not a held-out accuracy estimate. See [forensic counterexamples](forensic/README.md) and
-[research and limitations](../../../../docs/detection-research.md).
+The measurements and historical experiments below describe the original corpus, and several
+sections were written while LAME V0 was an open blind spot. **It no longer is**:
+`mp3_grid.rs` re-analyzes the signal through MP3's own hybrid filterbank and catches both
+V0 fixtures at z > 200. Read the "still uncaught" notes below as history.
+
+On these 20 files today: 8/10 lossy derivatives detected (3 AAC, 5 MP3), 2/10 documented
+misses left `Indeterminate` (white noise at 320 kbps, MP3 upsampled to 96 kHz), 0/10
+lossless files accused, 7/10 lossless files called `ProbablyAuthentic` (the three 96 kHz
+ones are withheld by design), and no lossy file called authentic. These are development
+regressions, not a held-out accuracy estimate. See
+[forensic counterexamples](forensic/README.md) and
+[research and limitations](../../../../docs/detection-research.md), which also holds the
+validation on real recordings that this noise-built corpus cannot provide.
 
 # Test corpus
 

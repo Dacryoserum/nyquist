@@ -138,6 +138,11 @@
         a: a.mdct_grid.analyzed ? (a.mdct_grid.grid_detected ? T.mdct.detected : T.mdct.clear) : na(),
         b: b.mdct_grid.analyzed ? (b.mdct_grid.grid_detected ? T.mdct.detected : T.mdct.clear) : na()
         // A negative grid search is not proof of higher quality or a lossless history.
+      },
+      {
+        label: T.mp3.title,
+        a: a.mp3_grid.analyzed ? (a.mp3_grid.grid_detected ? T.mp3.detected : T.mp3.clear) : na(),
+        b: b.mp3_grid.analyzed ? (b.mp3_grid.grid_detected ? T.mp3.detected : T.mp3.clear) : na()
       }
     ];
 
@@ -321,6 +326,12 @@
       <div class="panel">
         <span class="panel-label">{entry.side} — {T.mdct.title}</span>
         <MdctGrid grid={entry.r.mdct_grid} />
+      </div>
+    {/each}
+    {#each [{ r: a, side: "A" }, { r: b, side: "B" }] as entry (entry.side)}
+      <div class="panel">
+        <span class="panel-label">{entry.side} — {T.mp3.title}</span>
+        <MdctGrid grid={entry.r.mp3_grid} />
       </div>
     {/each}
   </div>
